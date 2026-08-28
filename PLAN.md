@@ -70,8 +70,34 @@
     "reset/replay não executado" (BAIXO, Sessão 04) **FECHADO**.
   - Revogação de papel / offboarding e limpeza assíncrona de convites expirados
     **adiados** (Sessão 06+; `accept_invitation` já rejeita expirados).
-- **Próxima**: Sessão 06 — criação da corrida: empresas/entregadores/veículos +
-  `delivery_request` (Fase 2 do roadmap).
+- **Sessão 06 (atual)**: Criação da corrida + gestão de empresas/veículos/entregadores —
+  **concluída — PASS**.
+  - **21 migrations** em `supabase/migrations/` (0001-0019 + **0020** management RPCs +
+    **0021** `create_delivery_request`). **Nenhuma tabela nova**; único schema change:
+    `idx_vehicles_plate_uk` (unique em `vehicles.plate`).
+  - **ADR-011**: criação da corrida + gestão de entidades. Criação = `draft` + itens +
+    evento `delivery_created` (sem preço; pricing é Sessão 07). Snapshots auto-contidos;
+    pontos PostGIS montados server-side. `external_reference` = dedup (não retry).
+    Matriz de autoridade de gestão D4 (estende ADR-009). Mutação só via RPC DEFINER.
+    Capture de ator por `auth.uid()`.
+  - **0020** — 6 RPCs DEFINER: `create_organization`, `create_business`,
+    `create_business_location`, `create_vehicle` (driver self ou admin; driver-owned),
+    `set_current_vehicle`, `update_driver_status` (super/admin, sem system).
+  - **0021** — `create_delivery_request` DEFINER: `draft` + `delivery_items` +
+    `delivery_events(delivery_created)` atômico. Authz system/admin/membro de org.
+  - **Offboarding parcial**: `update_driver_status` (active/suspended/blocked) fecha o
+    lado driver do risco em aberto; `remove_platform_role`/`remove_org_member` ainda
+    deferidos.
+  - **Hardening — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` (via SQL + Management API) + replay **0001→0021 em ordem**
+    → 21/21 limpo. Inventário: 26 tabelas, RLS 26/26, 7 novos RPCs DEFINER,
+    `vehicles.plate` unique, `anon`=0 em `public`.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37** — todas PASS (não
+    simulado). Bug T4 corrigido na validação (JWT residual em `create_vehicle`).
+  - **Veredito**: GO para Sessão 07.
+- **Próxima**: Sessão 07 — pricing engine determinístico (cotação, `delivery_quotes`,
+  `draft → quoted`).
 
 ## Roadmap (20 fases / 29 sessões)
 

@@ -111,6 +111,47 @@ Regras:
   O token nunca mente sobre papéis (lê sempre o estado atual do banco); custom claims
   exigiria reemitir tokens a cada mudança de papel.
 
+### Matriz de autoridade de gestão (Sessão 06, ADR-011 D4)
+
+Estende a matriz RBAC do ADR-009 para a **criação/mutation** de entidades e da corrida.
+Todas via RPC `SECURITY DEFINER` (Modelo B) — `authenticated` **sem DML** nessas
+tabelas; a única mutação user-facing é a RPC, que checa `auth.uid()` internamente.
+`anon`: nada. Visibilidade (SELECT) já coberta pela RLS de 0017.
+
+| RPC | Autorizado (user path) | System path |
+|---|---|---|
+| `create_organization` | `is_super_or_admin()` (provisionamento de tenant) | permitido (backend) |
+| `create_business` | `is_super_or_admin()` **ou** `business_owner` da própria org | permitido |
+| `create_business_location` | `business_owner` da org do business **ou** `is_super_or_admin()` | permitido |
+| `create_vehicle` | **driver self** (`drivers.user_id = auth.uid()` de `p_driver_id`) **ou** `is_super_or_admin()` | permitido |
+| `set_current_vehicle` | driver dono do veículo **ou** `is_super_or_admin()` | permitido |
+| `update_driver_status` | `is_super_or_admin()` apenas | **negado** |
+| `create_delivery_request` | membro da org (`organization_memberships`) **ou** `is_platform_admin()` (admin/operator) | **permitido** (api/integration/whatsapp) |
+
+Notas:
+- **`create_organization` = super/admin apenas**: criar tenant é ato de plataforma. O
+  primeiro `business_owner` entra via convite (0019) depois da org existir.
+- **`create_vehicle` = driver self ou admin**: veículos são **driver-owned**
+  (`vehicles.driver_id` NOT NULL; drivers platform-scoped). O entregador registra a
+  própria moto (PPA na Sessão 17); admin pode provisionar. `create_driver` (0019) é
+  admin-only (cria identidade); veículo é posse do driver.
+- **`update_driver_status` = super/admin, sem system**: ativa/suspende/bloqueia é
+  mutação de **identidade** — alinhado a 0019 (mutação de identidade exige admin
+  autenticado, sem system). Fecha o lado driver do risco offboarding (parcialmente:
+  `account_status` cobre ativo/suspenso/bloqueado; `remove_platform_role`/
+  `remove_org_member` ainda deferidos).
+- **`create_delivery_request` aceita system path**: origens `api`/`integration`/
+  `whatsapp` (Sessões 13/15–16) criam corrida via backend system-scoped. Dashboard
+  (business/admin/operator) usa user path. `operator` (em `is_platform_admin()`) pode
+  criar — despacho operacional pode abrir corrida manualmente.
+- **`external_reference` = dedup de criação** (não retry): `on conflict
+  (organization_id, external_reference) do nothing` → `already_exists` idempotente.
+  Distinto de `idempotency_key` (ver **R17** abaixo). Retries de operação ficam com
+  `integration_events.idempotency_key` (Sessão 13).
+- **Ator capturado por `auth.uid()`** (D6): system → `'system'`; platform admin →
+  `'admin'`; membro de org → `'business'`. O `actor_type` nunca vem de parâmetro
+  (alinha com `transition_delivery`).
+
 ## Idempotência
 
 - `idempotency_key` em endpoints mutantes; `external_event_id` por evento.

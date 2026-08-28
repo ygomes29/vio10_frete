@@ -6,6 +6,51 @@
 
 ## Histórico
 
+### Sessão 06 — Criação da corrida + gestão de empresas/veículos/entregadores — PASS
+
+- **ADR-011** escrito **antes** do código (criação=draft sem preço, snapshots,
+  external_reference=dedup, matriz de autoridade de gestão D4, mutação só via RPC
+  DEFINER, capture de ator) — regra mestra respeitada.
+- **0020 — 6 RPCs `SECURITY DEFINER`** (`create_organization`, `create_business`,
+  `create_business_location`, `create_vehicle`, `set_current_vehicle`,
+  `update_driver_status`) + `create unique index idx_vehicles_plate_uk on
+  vehicles(plate)`. Authz por `auth.uid()`; `create_vehicle` driver self (driver-owned);
+  `update_driver_status` super/admin **sem system** (mutação de identidade, alinha a
+  0019). Idempotentes onde há chave natural (`create_vehicle` via `on conflict (plate)`
+  → `already_exists`). Grants: authenticated EXECUTE (sem DML); anon nada.
+- **0021 — `create_delivery_request`** `SECURITY DEFINER`: cria `draft` + itens +
+  evento `delivery_created` numa transação. Authz system/admin/membro de org. Pontos
+  PostGIS montados server-side (`set search_path = public, extensions, pg_catalog`).
+  `external_reference` dedup via `on conflict (organization_id, external_reference)
+  do nothing` → `already_exists`. Pré-valida itens (jsonb array, description não-vazio,
+  quantity > 0). Capture de ator por `auth.uid()` (D6 — nunca de param).
+- **`test_vio10_creation.sql`** (37 asserções, begin/rollback + SELECT consolidado):
+  org/business/location/vehicle/set_current_vehicle/update_driver_status/
+  create_delivery_request; cross-tenant negado; admin/operator/system ok;
+  external_reference dedup; location de outro business; itens vazios/malformados;
+  vehicle_required null; pickup_lat null; ponto xy; evento delivery_created.
+  **37/37 PASS (real)**.
+- **Bug real encontrado e corrigido na validação**: bloco T4 (`create_vehicle` driver
+  self) não executava `set_config` antes — rodava sob JWT residual `uBO`
+  (business_owner) → `not_authorized` (downstream: T4b e T5 falhavam). Adicionado
+  `set_config(uDrv)` antes do bloco; T4b ajustado para mesmo driver + placa duplicada
+  (antes usava `v_drv2`, que falhava authz antes do conflito de placa). **Lição: cada
+  bloco de teste autenticado deve setar explicitamente o JWT; herdar JWT de bloco
+  anterior mascara falhas de authz.**
+- **Reset/replay from-scratch**: `drop schema public cascade` + `delete from
+  auth.users` + recriar `public` (via SQL + Management API) + replay **0001→0021 em
+  ordem** → 21/21 limpo. Inventário: 26 tabelas (nenhuma nova), RLS 26/26, 7 novos
+  RPCs DEFINER, `vehicles.plate` unique, `anon`=0 em `public`.
+- **Suítes re-executadas após reset from-scratch**: invariants **13/13**, rpcs
+  **48/48**, authz **21/21**, auth_lifecycle **34/34**, creation **37/37** — todas
+  PASS (não simulado).
+- **Risco aberto (BAIXO) atualizado — offboarding/revogação**: lado **driver**
+  **FECHADO** nesta sessão (`update_driver_status`: active/suspended/blocked). Lado
+  **papel/membership** (`remove_platform_role`, `remove_org_member`) **ainda
+  deferido** (Sessão 06+ quando surgir o fluxo de offboarding completo). Ver "Achados
+  abertos".
+- **Veredito**: GO para Sessão 07 (pricing engine determinístico; `draft → quoted`).
+
 ### Sessão 05 — Auth de usuários (Supabase Auth) + reset/replay from-scratch — PASS
 
 - **ADR-010** escrito **antes** do código (auth method, profile, convites, JWT,
@@ -138,11 +183,13 @@
 
 ## Achados abertos
 
-- **Revogação de papel / offboarding** (BAIXO): `remove_platform_role`,
-  `remove_org_member`, `deactivate_driver` e limpeza assíncrona de convites
-  expirados não existem (Sessão 05 entregou atribuição, não revogação). Adiados para
-  Sessão 06+. `accept_invitation` já rejeita `expires_at < now()`; o modelo
-  (`drivers.account_status`, delete em memberships) suporta revogação futura.
+- **Revogação de papel / offboarding** (BAIXO): lado **driver** **FECHADO** na Sessão
+  06 (`update_driver_status`: active/suspended/blocked). Lado **papel/membership**
+  (`remove_platform_role`, `remove_org_member`) e limpeza assíncrona de convites
+  expirados ainda não existem (Sessão 05 entregou atribuição, não revogação). Adiados
+  para Sessão 06+ (fluxo de offboarding completo). `accept_invitation` já rejeita
+  `expires_at < now()`; o modelo (`drivers.account_status`, delete em memberships)
+  suporta revogação futura.
 
 ## Classificação de severidade (a usar nas revisões)
 

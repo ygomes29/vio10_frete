@@ -139,7 +139,17 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   `is_platform_admin()` (ADR-010 D4.1). Hardening final: reset via SQL + replay
   0001→0019 limpo (19/19); invariants 13/13, rpcs 48/48, authz 21/21, auth_lifecycle
   34/34 PASS. Risco "reset/replay não executado" (Sessão 04) FECHADO.
-- **Próxima**: Sessão 06 — criação da corrida: empresas/entregadores/veículos +
-  `delivery_request` (Fase 2 do roadmap).
+- **Sessão 06 (concluída)**: Criação da corrida + gestão de empresas/veículos/
+  entregadores — **PASS**. 21 migrations (**0020** 6 RPCs DEFINER de gestão +
+  `idx_vehicles_plate_uk`; **0021** `create_delivery_request` DEFINER). ADR-011
+  (criação=`draft`+itens+evento `delivery_created`, sem preço; snapshots auto-contidos;
+  pontos PostGIS server-side; `external_reference`=dedup; matriz de autoridade D4;
+  mutação só via RPC DEFINER; capture de ator por `auth.uid()`). `update_driver_status`
+  (super/admin, sem system) fecha o lado driver do risco offboarding. Nenhuma tabela
+  nova. Hardening: reset via SQL + replay 0001→0021 limpo (21/21); invariants 13/13,
+  rpcs 48/48, authz 21/21, auth_lifecycle 34/34, creation 37/37 PASS. Bug T4 corrigido
+  na validação (JWT residual em `create_vehicle`).
+- **Próxima**: Sessão 07 — pricing engine determinístico (cotação, `delivery_quotes`,
+  `draft → quoted`).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

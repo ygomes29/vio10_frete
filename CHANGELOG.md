@@ -254,6 +254,64 @@ Formato: sessão + data + escopo.
   `num_failed()` (o endpoint só devolve o último resultset; `finish()` sozinho perdia
   as linhas `ok`). authz/auth_lifecycle já consolidam resultado num único SELECT.
 
+## [Sessão 06] — 2026-08-28 — Criação da corrida + gestão de empresas/veículos/entregadores
+
+### Adicionado
+- **ADR-011** — criação da corrida + gestão de entidades. D1 criação=`draft`+itens+
+  evento `delivery_created` (sem preço; pricing é Sessão 07); D2 snapshots
+  auto-contidos + ponto montado server-side (PostGIS); D3 `external_reference`=dedup
+  (não retry); D4 matriz de autoridade de gestão (estende ADR-009); D5 mutação só via
+  RPC DEFINER; D6 capture de ator por `auth.uid()`.
+- **Migration 0020** — 6 RPCs `SECURITY DEFINER` de gestão: `create_organization`,
+  `create_business`, `create_business_location`, `create_vehicle`, `set_current_vehicle`,
+  `update_driver_status`. + `create unique index idx_vehicles_plate_uk on
+  public.vehicles(plate)` (placa fisicamente única; `create_vehicle` idempotente via
+  `on conflict (plate)`). Grants least-privilege (authenticated: EXECUTE, sem DML; anon:
+  nada).
+- **Migration 0021** — `create_delivery_request` `SECURITY DEFINER`: cria
+  `delivery_requests` (`status='draft'`) + `delivery_items` (1:N) +
+  `delivery_events` (`delivery_created`) numa transação. Authz system/admin/membro de
+  org. Pontos montados server-side (PostGIS). `external_reference` dedup via `on
+  conflict (organization_id, external_reference) do nothing` → `already_exists`.
+  Pré-valida itens (jsonb array, `description` não-vazio, `quantity > 0`).
+- **`supabase/tests/test_vio10_creation.sql`** — 37 asserções (begin/rollback + SELECT
+  consolidado). Criação de org/business/location/vehicle/set_current_vehicle/
+  update_driver_status/create_delivery_request; cross-tenant negado; admin/operator/
+  system ok; `external_reference` dedup (mesma org vs outra org); location de outro
+  business; itens vazios/malformados; `vehicle_required` null; pickup_lat null; ponto
+  xy; evento `delivery_created`.
+
+### Decisões
+- **Criação = `draft` (sem preço)**: confirmado por `PRODUCT.md` (criação ≠ cálculo de
+  preço), `DELIVERY_LIFECYCLE.md` (`draft → quoted` = sistema/pricing) e o schema
+  (`delivery_requests` sem colunas de preço; preço em `delivery_quotes`). Pricing
+  (cotação, `draft → quoted`) é **Sessão 07**.
+- **Veículos driver-owned**: `create_vehicle` autoriza driver self (`drivers.user_id=
+  auth.uid()`) ou super/admin. `create_driver` (0019) é admin-only (cria identidade);
+  veículo é posse do driver.
+- **`update_driver_status` (super/admin, sem system)**: fecha o lado driver do risco
+  "offboarding/revogação" em aberto desde a Sessão 05 (account_status cobre
+  ativo/suspenso/bloqueado). `remove_platform_role`/`remove_org_member` (revogação de
+  papel/membership) ainda deferidos.
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- **Reset from-scratch** via SQL + **replay 0001→0021 em ordem** — 21/21 limpo (sem
+  MIGFAIL).
+- Inventário: 26 tabelas (nenhuma nova), RLS 26/26, 7 novos RPCs `SECURITY DEFINER`
+  (6 gestão + 1 criação), `vehicles.plate` unique, `anon`=0 grants em `public`
+  (os grants `anon` em `realtime`/`storage` são schemas Supabase, não domínio).
+- `test_vio10_invariants.sql` → **13/13 PASS**; `test_vio10_rpcs.sql` → **48/48 PASS**;
+  `test_vio10_authz.sql` → **21/21 PASS**; `test_vio10_auth_lifecycle.sql` → **34/34
+  PASS**; `test_vio10_creation.sql` → **37/37 PASS** — todas reais (não simulado).
+- Veredito **GO → Sessão 07** (pricing engine determinístico).
+
+### Corrigido (durante a validação real)
+- **`test_vio10_creation.sql` T4**: bloco `create_vehicle` (driver self) não executava
+  `set_config` antes — rodava sob JWT residual `uBO` (business_owner) →
+  `not_authorized`. Adicionado `set_config(uDrv)` antes do bloco. T4b ajustado para
+  chamar `create_vehicle(v_drv, …)` (mesmo driver, placa duplicada) em vez de `v_drv2`
+  (que falhava authz antes do conflito de placa). 37/37 após o ajuste.
+
 ## [Sessão 01] — 2026-08-27 — Diagnóstico
 - Repositório confirmado greenfield.
 - Arquitetura proposta e aprovada com ajustes (ver Sessão 02).

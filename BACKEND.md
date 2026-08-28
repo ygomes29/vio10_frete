@@ -110,9 +110,62 @@ de privilégio. Helper `my_email()` (DEFINER) resolve o email do caller para
 `accept_invitation` sem expor `auth.users` ao `authenticated`.
 
 **Ainda não implementado (Sessão 06+ offboarding):** `remove_platform_role`,
-`remove_org_member`, `deactivate_driver`, e limpeza assíncrona de convites
-expirados. `accept_invitation` já rejeita expirados; o modelo suporta revogação
-futura (`drivers.account_status`, delete em memberships).
+`remove_org_member` (revogação de papel/membership) e limpeza assíncrona de
+convites expirados. `accept_invitation` já rejeita expirados; o modelo suporta
+revogação futura (delete em memberships). O lado **driver** do offboarding já existe
+via `update_driver_status` (ver §4.2).
+
+### 4.2 RPCs de gestão de entidades + criação da corrida (Sessão 06, ADR-011)
+
+Implementadas em `supabase/migrations/0020_management_rpcs.sql` (6 RPCs) e
+`0021_create_delivery_request.sql` (1 RPC). **Modelo B**: `SECURITY DEFINER` +
+checagem interna de `auth.uid()`; `authenticated` **sem DML** em
+organizations/businesses/business_locations/vehicles/delivery_requests — só EXECUTE
+nas RPCs + SELECT sob RLS (0017); `anon` nada. **Nenhuma tabela nova**; único schema
+change: `create unique index idx_vehicles_plate_uk on public.vehicles(plate)` (0020).
+
+- **`create_organization(p_name, p_legal_name, p_document)`** → `(ok, reason,
+  organization_id)`. Provisionamento de tenant. Authz: `is_super_or_admin()` ou system
+  (null). Sem chave natural — cada chamada cria um org; dedup é do serviço.
+- **`create_business(p_organization_id, p_name)`** → `(ok, reason, business_id)`.
+  Authz: `is_super_or_admin()` **ou** `business_owner` da própria org (via
+  `organization_memberships`). Valida org existe.
+- **`create_business_location(p_business_id, p_label, p_address, p_latitude,
+  p_longitude, p_contact_name, p_contact_phone)`** → `(ok, reason,
+  business_location_id)`. `set search_path = public, extensions, pg_catalog`.
+  Resolve org do business; authz business_owner da org ou admin. Monta `point`
+  (`geography`) via PostGIS se lat/lng ambos presentes; respeita o CHECK "ambos null
+  ou ambos set" do schema (`invalid_latlng` se parcial).
+- **`create_vehicle(p_driver_id, p_vehicle_type, p_plate, p_model, p_capacity_kg)`**
+  → `(ok, reason, vehicle_id)`. Veículos **driver-owned**. Authz: **driver self**
+  (`drivers.user_id = auth.uid()` de `p_driver_id`) **ou** `is_super_or_admin()` **ou**
+  system. Normaliza placa (`upper`); idempotente via `on conflict (plate) do nothing`
+  → `already_exists`. Valida driver existe, `capacity_kg > 0`.
+- **`set_current_vehicle(p_vehicle_id)`** → `(ok, reason)`. Authz: driver dono do
+  veículo (`vehicles.driver_id` → `drivers.user_id=auth.uid()`) ou admin. Seta
+  `drivers.current_vehicle_id`.
+- **`update_driver_status(p_driver_id, p_new_status)`** → `(ok, reason)`. Authz:
+  `is_super_or_admin()` **apenas** (sem system — mutação de identidade, alinha a 0019).
+  `p_new_status ∈ ('active','suspended','blocked')` (não permite voltar a `pending`).
+  **Fecha o lado driver do risco offboarding** (ativo/suspender/bloquear).
+- **`create_delivery_request(p_organization_id, p_business_id, p_business_location_id,
+  p_pickup_*, p_delivery_*, p_vehicle_required, p_priority, p_scheduled_at, p_origin,
+  p_external_reference, p_notes, p_instructions, p_items jsonb, p_correlation_id)`**
+  → `table(ok boolean, reason text, delivery_request_id uuid)`. `set search_path =
+  public, extensions, pg_catalog`. **Cria a corrida em `draft`** (sem preço — pricing
+  é Sessão 07). Authz: system (null) **ou** `is_platform_admin()` **ou** membro da org.
+  Valida tenancy (org existe; business na org; location no business); campos
+  obrigatórios; **pré-valida itens** (jsonb array não-vazio, cada item com
+  `description` não-vazio + `quantity > 0`). Monta `pickup_point`/`delivery_point`
+  server-side (PostGIS). `external_reference` = dedup: `on conflict (organization_id,
+  external_reference) do nothing` → `already_exists` (idempotente). Insere
+  `delivery_items` (1:N) + `delivery_events` (`delivery_created`, `from_status=null`,
+  `to_status='draft'`, ator capturado por `auth.uid()`). Tudo atômico.
+
+**Matriz de autoridade (D4, estende ADR-009):** ver `docs/SECURITY.md` (seção
+"Matriz de autoridade de gestão") e ADR-011. **Defesa em profundidade:** criação de
+corrida é imposta no banco (RPC DEFINER valida tenancy) **e** no serviço (authz antes
+da RPC) — igual ao padrão de atribuição.
 
 ## 5. Idempotência
 

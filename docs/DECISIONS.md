@@ -21,6 +21,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-008 | Valores financeiros em centavos inteiros | Aprovado |
 | ADR-009 | Matriz RBAC (papel × recurso × ação) — escopo MVP | Aprovado (Sessão 04) |
 | ADR-010 | Ciclo de vida de identidade e autenticação (MVP) | Aprovado (Sessão 05) |
+| ADR-011 | Criação da corrida + gestão de entidades (empresas/veículos/entregadores) | Aprovado (Sessão 06) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -82,6 +83,47 @@ Aprovadas na Sessão 02 (2026-08-27).
   de privilégio do `operator`.
 - **JWT DB-lookup, sem custom claims** (ADR-010 D5): helpers `is_platform_admin`/
   `my_org_ids`/`my_driver_id` resolvem o caller; nada em `auth.hook.custom_access_token`.
+
+## Decisões adicionais da Sessão 06 (criação da corrida, 2026-08-28)
+
+- **Criação = `draft` + itens + evento `delivery_created`, sem preço** (ADR-011 D1):
+  `create_delivery_request` insere `delivery_requests` (`status='draft'`) +
+  `delivery_items` + um `delivery_events` (`delivery_created`) numa transação. Nenhuma
+  cotação — pricing (cotação, `draft → quoted`) é **Sessão 07** (motor determinístico
+  escreve `delivery_quotes`). Confirmado por `PRODUCT.md` (criação ≠ cálculo de preço),
+  `DELIVERY_LIFECYCLE.md` (`draft → quoted` autorizado a sistema/pricing) e o schema
+  (`delivery_requests` não tem colunas de preço; preço vive em `delivery_quotes`).
+- **Snapshots auto-contidos; ponto montado server-side** (ADR-011 D2): pickup/delivery
+  passados explicitamente (address + lat/lng + `contact_phone` obrigatórios);
+  `business_location_id` é link soft (nullable, on delete set null) — o snapshot é a
+  verdade. O `geography(Point,4326)` é montado server-side via
+  `ST_SetSRID(ST_MakePoint(lng,lat),4326)::geography` (caller nunca envia o point);
+  mantém o invariante `point ↔ (lat,lng)` e centraliza PostGIS (schema `extensions`).
+- **`external_reference` = dedup de criação (NÃO retry)** (ADR-011 D3): se informado e
+  já existir `(organization_id, external_reference)` → `already_exists` com id
+  existente (`ok=true`, idempotente). É dedup do vínculo externo (uma org não cria duas
+  corridas para o mesmo pedido externo), **não** chave de retry. Retries de
+  API/integration ficam com `integration_events.idempotency_key` (Sessão 13). Ver R17.
+- **Matriz de autoridade de gestão** (ADR-011 D4, estende ADR-009):
+  `create_organization`=super/admin; `create_business`=super/admin ou business_owner
+  da org; `create_business_location`=business_owner da org do business ou admin;
+  `create_vehicle`=**driver self** ou super/admin (veículos driver-owned);
+  `set_current_vehicle`=driver dono ou admin; `update_driver_status`=super/admin
+  (sem system — mutação de identidade, alinha a 0019); `create_delivery_request`=
+  membro da org ou `is_platform_admin()` (admin/operator), **system path permitido**
+  (api/integration/whatsapp).
+- **`vehicles.plate` unique** (0020): placa fisicamente única; `create_vehicle`
+  idempotente via `on conflict (plate) do nothing` → `already_exists`.
+- **Mutação só via RPC DEFINER** (ADR-011 D5): nenhuma policy INSERT/UPDATE/DELETE para
+  `authenticated` em organizações/businesses/locations/vehicles/delivery_requests (RLS
+  SELECT já existe em 0017). Apenas grants EXECUTE são adicionados. `anon`: nada.
+- **Capture de ator** (ADR-011 D6): system path → `actor_type='system'`; platform admin
+  → `'admin'`; membro de org → `'business'`. `actor_id = auth.uid()` quando presente.
+  Alinha com `transition_delivery` (ator deriva de `auth.uid()`, nunca de params).
+- **Offboarding parcial** (0020 `update_driver_status`): ativa/suspende/bloqueia driver
+  (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
+  driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
+  `remove_org_member` (revogação de papel/membership) ainda deferidos.
 
 ## Decisões ainda em aberto (a resolver nas próximas sessões)
 
