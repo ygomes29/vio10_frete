@@ -312,6 +312,56 @@ Formato: sessão + data + escopo.
   chamar `create_vehicle(v_drv, …)` (mesmo driver, placa duplicada) em vez de `v_drv2`
   (que falhava authz antes do conflito de placa). 37/37 após o ajuste.
 
+## [Sessão 10] — 2026-08-28 — Atribuição atômica em concorrência real (GATE de produção)
+
+### Adicionado
+- **ADR-015** — harness de concorrência real (GATE de produção, ADR-007). D1 mecanismo
+  (curls paralelos ao Management API — `dblink_connect_u` negado/não-superuser, senha
+  nunca na linha de comando; verificado empiricamente: N curls paralelos rodam em
+  conexões backend separadas concorrentemente); D2 três races (A: 2 `claim_delivery`
+  paralelos; B: 2 `select_winner_and_claim` paralelos; C: SWAC vs claim direto —
+  observacional); D3 invariante do GATE (≤1 assignment ativa, exatamente 1 won,
+  assigned, closed — determinístico no DB, vencedor não-determinístico); D4 achado de
+  lock-ordering (SWAC round→delivery vs claim delivery→round-update — deadlock latente,
+  não-hazard vivo, reproduzido empiricamente como 40P01 no Test C run 2, invariante
+  sobreviveu); D5 sem migration/schema/grant novo; D6 critério de PASS (≥5 runs reais);
+  D7 ambiente/segurança (dev only, nunca produção, PAT em `~/.supabase/vio10_dev_pat`).
+- **`supabase/tests/concurrency_harness.sh`** + **`concurrency_setup.sql`** — artefato do
+  GATE: reset + replay 0001→0024 + inventário + 8 suítes de regressão + harness de
+  concorrência (3 races × N runs). Self-contained, paths relativos, gera `verdict.sql`.
+
+### Decisões
+- **Mecanismo do harness = curls paralelos ao Management API** (substitui `dblink` no
+  arcabouço de teste de concorrência — reutilizável para futuros gates). `dblink_connect_u`
+  é negado (role não-superuser); senha na linha de comando é vazamento (bloqueado).
+- **Test C é observacional (DB-state only)**: SWAC vs claim direto tem lock-ordering
+  divergente → pode deadlockar (40P01) → retorno RPC não-determinístico; o invariante de
+  DB é determinístico e é o que se afirma.
+- **Lock-ordering `claim_delivery`↔SWAC = dívida técnica observada, hardening adiado**:
+  não é hazard vivo (`claim_delivery` só roda dentro de SWAC, mesma transação). Se um
+  futuro camino chamar claim direto concorrente com SWAC, endurecer (claim adquirir round
+  `FOR UPDATE` antes do delivery, espelhando SWAC) ou centralizar o close fora do claim.
+- **Sem migration, sem schema/RPC/grant novo** — Sessão 10 é validação, não feature.
+
+### Validado
+- **GATE PASS**: invariante ADR-007 (≤1 `delivery_assignment` ativa por `delivery_request`)
+  sustentado em **5 runs × 3 races = 15 corridas reais paralelas** (não simulado). Todas:
+  `n_assign=1, n_won=1, n_lost=1, del_status='assigned', round_status='closed'`.
+  - Test A: sempre 1 `true|won` + 1 `false|not_searching_driver`.
+  - Test B: sempre 1 `true|won` + 1 `false|round_not_open`.
+  - Test C: 1 vencedor + 1 perdedor; run 2 reproduziu 40P01 (deadlock) no SWAC —
+    invariante sobreviveu (confirma empiricamente o achado D4).
+- **Regressão (8 suítes) PASS**: invariants 13/13, rpcs 48/48, authz 21/21, auth_lifecycle
+  34/34, creation 37/37, pricing 62/62, dispatch 65/65, bid 61/61. Reset + replay
+  0001→0024 (24/24 limpo). Inventário: 26 tabelas, RLS 26/26, SWAC system-only, `anon`=0.
+
+### Corrigido
+- **Bug de harness (não de RPC)**: 1ª versão reusava longitudes entre os 5 runs → drivers
+  perdedores de runs anteriores (active/available sem assignment) vazavam para a
+  eligibility de runs posteriores → `n_lost` crescia (1,2,3,4,4). Invariante núcleo
+  (`n_assign=1`, `n_won=1`) nunca violado. Corrigido com offset de 1°/run (~111km >> raio
+  10km). Lição: poluição cross-RUN — isole por pickup geográfica distinta por run também.
+
 ## [Sessão 09] — 2026-08-28 — Bid engine (scoring + seleção + `claim_delivery` atômico)
 
 ### Adicionado

@@ -231,6 +231,23 @@ fecha a rodada, pontua e atribui; os pesos de scoring não vêm do business. Via
   `bids` já têm RLS SELECT (0017) + `service_role` DML (0015); `claim_delivery`/
   `transition_delivery` já concedidos a `service_role` (0016).
 
+### Concorrência real — GATE de produção (Sessão 10, ADR-015)
+
+- **Invariante ADR-007 (≤1 `delivery_assignment` ativa por `delivery_request`) validada
+  em concorrência REAL** — backends concorrentes em conexões separadas, não
+  single-transaction. 5 runs × 3 races (A: 2 `claim_delivery` paralelos; B: 2
+  `select_winner_and_claim` paralelos; C: SWAC vs claim direto) — todas sustentaram
+  `n_assign=1, n_won=1, del_status='assigned', round_status='closed'`. Mecanismo: curls
+  paralelos ao Management API (`dblink_connect_u` negado/não-superuser; senha nunca na
+  linha de comando — vazamento bloqueado). Harness em `supabase/tests/concurrency_harness.sh`.
+- **Achado de lock-ordering (deadlock latente, não-hazard vivo)**: `select_winner_and_claim`
+  adquire round→delivery; `claim_delivery` adquire delivery→(UPDATE round late). Claim
+  **direto** concorrente com SWAC cross-tx forma ciclo → 40P01 (reproduzido no Test C;
+  invariante sobreviveu — Postgres aborta um tx, o outro vence). **Não é hazard vivo**:
+  `claim_delivery` só roda dentro de SWAC (mesma transação, re-lock reentrante). Dívida
+  técnica observada: se um futuro camino chamar claim direto concorrente com SWAC
+  (reatribuição de emergência, legado), endurecer o lock order. Não muda o invariante.
+
 ## Idempotência
 
 - `idempotency_key` em endpoints mutantes; `external_event_id` por evento.

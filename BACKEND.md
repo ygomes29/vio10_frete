@@ -66,11 +66,16 @@ valida). `authenticated` não recebe DML de domínio — só EXECUTE nas RPCs + 
 - `set_driver_availability(p_driver_id, p_status, p_reason)` — atualiza
   `drivers.current_availability_status` + append em `driver_availability` (log).
 
-Ainda não implementado (Sessão 10): harness de **concorrência real** de
-`claim_delivery`/`select_winner_and_claim` (dois claims paralelos via `dblink`/advisory
-lock) — gate formal de produção (ADR-007). A seleção pontua/ordena candidatos e chama
-`claim_delivery` via `select_winner_and_claim` (§4.5, Sessão 09); a atomicidade
-funcional já é testada.
+**Concorrência real (Sessão 10, GATE de produção — PASS, ADR-015):** o invariante ≤1
+`delivery_assignment` ativa por `delivery_request` (ADR-007) foi validado sob
+**backends concorrentes** (conexões separadas), não single-transaction. Mecanismo:
+curls paralelos ao Management API (`dblink_connect_u` negado/não-superuser; senha
+nunca na linha de comando). 5 runs × 3 races (A: 2 `claim_delivery` paralelos; B: 2
+`select_winner_and_claim` paralelos; C: SWAC vs claim direto) — todas sustentaram
+`n_assign=1, n_won=1, assigned, closed`. Harness em `supabase/tests/concurrency_harness.sh`.
+**Achado:** lock-ordering `claim_delivery`(delivery→round-update) ↔
+`select_winner_and_claim`(round→delivery) — deadlock latente (40P01) se claim direto
+racear SWAC cross-tx; não-hazard vivo (claim só roda dentro de SWAC); hardening adiado.
 
 ### 4.1 RPCs de identidade / convite (Sessão 05, ADR-010)
 
@@ -311,8 +316,11 @@ DEFINER`; `authenticated` **sem EXECUTE** (defesa em profundidade); `anon`: nada
 novo = `execute on select_winner_and_claim to service_role`. `dispatch_rounds`/
 `delivery_offers`/`bids` já têm RLS SELECT (0017) + `service_role` DML (0015).
 `claim_delivery`/`transition_delivery` já concedidos a `service_role` (0016). **GATE
-(Sessão 10)**: atomicidade funcional testada (exatamente 1 assignment ativo,
-`already_assigned` no pós-race); harness de concorrência real é o gate formal de produção.
+(Sessão 10) — PASS (ADR-015):** atomicidade validada em **concorrência real** (5 runs ×
+3 races, backends concorrentes via curls paralelos ao Management API): invariante ≤1
+assignment ativa, exatamente 1 won, delivery `assigned`, round `closed` sustentados em
+todas as corridas. Lock-ordering `claim_delivery`↔SWAC observado (deadlock latente
+40P01, não-hazard vivo — claim só roda dentro de SWAC); hardening adiado.
 
 ## 5. Idempotência
 

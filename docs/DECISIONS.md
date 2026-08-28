@@ -25,6 +25,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-012 | Pricing engine determinístico (cotação, `draft → quoted`) | Aprovado (Sessão 07) |
 | ADR-013 | Dispatch engine (busca de candidatos + raio progressivo, `quoted → searching_driver`) | Aprovado (Sessão 08) |
 | ADR-014 | Bid engine (scoring + seleção + `claim_delivery` atômico, `searching_driver → assigned`) | Aprovado (Sessão 09) |
+| ADR-015 | Harness de concorrência real (GATE de produção, ADR-007) | Aprovado (Sessão 10) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -127,6 +128,27 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 10 — Atribuição atômica em concorrência real (GATE de produção, ADR-015)
+
+- **GATE de produção (ADR-007) validado em concorrência REAL** — não simulada. Invariante
+  ≤1 `delivery_assignment` ativa por `delivery_request` sustentada em 5 runs × 3 races =
+  15 corridas reais paralelas (backends concorrentes em conexões separadas).
+- **Mecanismo do harness = curls paralelos ao Management API** (não `dblink`).
+  `dblink_connect_u` negado (role não-superuser); senha do banco nunca na linha de
+  comando (vazamento). Verificado: N curls paralelos rodam em conexões backend separadas
+  concorrentemente. Substitui `dblink` no arcabouço de teste de concorrência.
+- **3 races**: (A) 2 `claim_delivery` paralelos — primitivo, lock `delivery` serializa →
+  1 won + 1 `not_searching_driver`; (B) 2 `select_winner_and_claim` paralelos — hazard
+  real de produção (close duplicado), lock `round` serializa → 1 won + 1 `round_not_open`;
+  (C) SWAC vs claim direto — observacional, DB-state only.
+- **Achado: lock-ordering inconsistente (deadlock latente, não-hazard vivo)**. SWAC
+  adquire round→delivery; `claim_delivery` adquire delivery→(UPDATE round late). Claim
+  direto concorrente com SWAC forma ciclo → 40P01 (reproduzido no Test C run 2; invariante
+  sobreviveu). Não é hazard vivo: `claim_delivery` só roda dentro de SWAC (mesma tx, sem
+  deadlock). Hardening adiado (dívida técnica observada).
+- **Sem migration/schema/RPC/grant novo** — Sessão 10 é validação. Harness commitado em
+  `supabase/tests/` (reprodutibilidade/auditoria do GATE).
 
 ### Sessão 09 — Bid engine (scoring + seleção + `claim_delivery` atômico, ADR-014)
 

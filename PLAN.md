@@ -177,8 +177,41 @@
     longitude; asserção invertida T2). Nenhum bug de RPC em runtime (lições Sessão 07/08
     aplicadas proativamente).
   - **Veredito**: GO para Sessão 10.
-- **Próxima**: Sessão 10 — atribuição atômica em **concorrência real** (harness via
-  `dblink`/paralelismo, greenfield, ADR-007) — **GATE de produção**.
+- **Sessão 10 (atual)**: Atribuição atômica em concorrência real (GATE de produção,
+  ADR-007/ADR-015) — **concluída — PASS**.
+  - **ADR-015**: harness de concorrência real. D1 mecanismo = curls paralelos ao
+    Management API (`dblink_connect_u` negado/não-superuser; senha nunca na linha de
+    comando; verificado empiricamente — N curls paralelos rodam em conexões backend
+    separadas concorrentemente); D2 três races (A: 2 `claim_delivery` paralelos; B: 2
+    `select_winner_and_claim` paralelos; C: SWAC vs claim direto — observacional); D3
+    invariante do GATE (≤1 assignment ativa, exatamente 1 won, assigned, closed —
+    determinístico no DB); D4 achado de lock-ordering (deadlock latente 40P01,
+    não-hazard vivo — claim só roda dentro de SWAC; reproduzido empiricamente, invariante
+    sobreviveu; hardening adiado); D5 sem migration/schema/grant novo; D6 critério PASS
+    (≥5 runs reais); D7 ambiente/segurança (dev only).
+  - **Harness** commitado: `supabase/tests/concurrency_harness.sh` +
+    `concurrency_setup.sql` — reset + replay 0001→0024 + inventário + 8 suítes de
+    regressão + 3 races × N runs.
+  - **GATE PASS**: invariante ADR-007 sustentado em **5 runs × 3 races = 15 corridas reais
+    paralelas** (não simulado). Todas: `n_assign=1, n_won=1, n_lost=1, assigned, closed`.
+    Test A: 1 `won` + 1 `not_searching_driver`. Test B: 1 `won` + 1 `round_not_open`.
+    Test C: 1 vencedor + 1 perdedor (run 2 reproduziu 40P01 — invariante sobreviveu).
+  - **Bug de harness corrigido**: 1ª versão reusava longitudes entre runs → drivers
+    perdedores de runs anteriores vazavam para eligibility posterior (`n_lost` crescia);
+    invariante núcleo nunca violado. Corrigido com offset 1°/run (~111km >> raio 10km).
+  - **Sem migration, sem schema/RPC/grant novo** — Sessão 10 é validação.
+  - **Hardening — reset/replay from-scratch**: reset via SQL + replay **0001→0024** →
+    24/24 limpo. Inventário: 26 tabelas, RLS 26/26, SWAC system-only, `anon`=0 em public.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**,
+    dispatch **65/65**, bid **61/61** — todas PASS (regressão, não simulado).
+  - **Risco aberto (BAIXO) — novo**: lock-ordering `claim_delivery`↔SWAC (D4) — dívida
+    técnica observada, não-hazard vivo. Offboarding/revogação de papel/membership
+    permanece deferido (Sessão 06).
+  - **Veredito**: **GATE PASS** → GO para Sessão 11 (ciclo completo: máquina de estados
+    + proof of delivery).
+- **Próxima**: Sessão 11 — ciclo completo (máquina de estados pós-`assigned` + proof of
+  delivery).
 
 ## Roadmap (20 fases / 29 sessões)
 

@@ -6,6 +6,70 @@
 
 ## Histórico
 
+### Sessão 10 — Atribuição atômica em concorrência real (GATE de produção, ADR-007) — PASS
+
+- **GATE de produção formalmente validado em concorrência REAL** (não simulada). A
+  garantia do ADR-007 — ≤1 `delivery_assignment` ativa por `delivery_request` — foi
+  exercitada sob **backends concorrentes** (conexões separadas), não sob single-transaction.
+  **ADR-015** escrito antes do código (metodologia do harness, races, invariante, achado
+  de lock-ordering, critério de PASS, ambiente/segurança).
+- **Mecanismo do harness — curls paralelos ao Management API** (não `dblink`):
+  `dblink_connect_u` é **negado** no dev (role do Management API não é superuser); pôr a
+  senha do banco na linha de comando é vazamento de segredo (bloqueado). **Verificado
+  empiricamente**: N `curl` paralelos (bash `&`+`wait`) ao endpoint `/database/query` rodam
+  em conexões backend separadas e executam concorrentemente (dois `pg_sleep(1.5)` paralelos
+  ≈ 2s wall vs 5s serial). Concorrência genuína sem `dblink`/superuser/senha exposta.
+- **3 races × 5 runs = 15 corridas reais**, todas com o invariante sustentado
+  (`n_assign=1, n_won=1, n_lost=1, del_status='assigned', round_status='closed'`):
+  - **Test A — 2 `claim_delivery` paralelos** (mesma delivery, offers diferentes): sempre
+    1 `true|won` + 1 `false|not_searching_driver` (lock `FOR UPDATE` em `delivery_requests`
+    serializa; vencedor não-determinístico, invariante determinístico). Primitivo de
+    atribuição.
+  - **Test B — 2 `select_winner_and_claim` paralelos** (mesmo round): sempre 1
+    `true|won` + 1 `false|round_not_open` (lock `FOR UPDATE` na rodada serializa). Hazard
+    real de produção (orquestrador duplica/rechama o close — retry/webhook/2 workers).
+  - **Test C — `select_winner_and_claim` vs `claim_delivery` direto**: 1 vencedor + 1
+    perdedor; veredito só por DB-state (RPC não-determinístico aqui — ver D4).
+- **Achado D4 — lock-ordering inconsistente (deadlock latente, NÃO-hazard vivo, reproduzido
+  empiricamente)**: `select_winner_and_claim` (0024) adquire lock **round → delivery**;
+  `claim_delivery` (0016) adquire **delivery → (UPDATE round late, não pre-lockado)**. Um
+  `claim_delivery` **direto** raceando um SWAC em transações separadas sobre a mesma
+  delivery forma ciclo de wait → Postgres detecta deadlock (40P01) e aborta um. **Run 2 do
+  GATE reproduziu o 40P01** no side SWAC do Test C — e o invariante **sobreviveu**
+  (`n_assign=1`). Empiricamente confirma a análise. **Não é hazard vivo**: `claim_delivery`
+  é chamado **apenas dentro de** SWAC (mesma transação, re-lock reentrante, sem deadlock) —
+  a transição `searching_driver → assigned` só via SWAC→claim (Sessão 09). `claim_delivery`
+  tem `execute` a `service_role`, então o backend *poderia* chamá-lo direto, mas o caminho
+  arquitetado é SWAC-only. **Hardening adiado** (dívida técnica observada — não muda o
+  invariante): se um futuro camino chamar `claim_delivery` direto concorrente com SWAC
+  (reatribuição de emergência, integração legada), endurecer o lock order (claim adquirir
+  round `FOR UPDATE` antes do delivery, espelhando SWAC) ou centralizar o close fora do
+  claim. Adiado para não desestabilizar o código validado da Sessão 09.
+- **Bug de harness encontrado e corrigido na validação** (não bug de RPC): a 1ª versão
+  reusava as mesmas longitudes (100/200/300) entre os 5 runs → drivers **perdedores** de
+  runs anteriores (active/available, sem assignment, localização fresca) vazavam para a
+  eligibility do `open_dispatch_round` de runs posteriores → offers pending extras → R16
+  marcava-as `lost` → `n_lost` crescia (1,2,3,4,4). O invariante **núcleo** (`n_assign=1`,
+  `n_won=1`) **nunca violado** — só `n_lost` (cosmético do harness). Corrigido com offset
+  de 1°/run (~111km >> raio 10km) → isolamento total. **Lição:** poluição cross-RUN, mesma
+  classe da poluição cross-scenario da Sessão 09 — isole por pickup geográfica distinta
+  (não só por cenário, por **run** também) quando drivers perdedores persistem
+  active/available sem assignment entre runs.
+- **Sem migration, sem schema/RPC/grant novo**. `claim_delivery` (0016) e
+  `select_winner_and_claim` (0024) intactos — Sessão 10 é validação, não feature. Harness
+  commitado em `supabase/tests/concurrency_harness.sh` + `concurrency_setup.sql` para
+  reprodutibilidade/auditoria do GATE.
+- **Reset/replay + regressão**: reset via SQL + replay **0001→0024** (24/24 limpo);
+  inventário 26 tabelas, RLS 26/26, `select_winner_and_claim` DEFINER system-only
+  (execute só service_role), `anon`=0 em `public`. **8 suítes re-executadas**: invariants
+  **13/13**, rpcs **48/48**, authz **21/21**, auth_lifecycle **34/34**, creation **37/37**,
+  pricing **62/62**, dispatch **65/65**, bid **61/61** — todas PASS (não simulado).
+- **Risco aberto (BAIXO) — novo**: lock-ordering `claim_delivery`↔SWAC (D4 acima) —
+  dívida técnica observada, não-hazard vivo (claim só roda dentro de SWAC). Hardening
+  adiado. Offboarding/revogação de papel/membership permanece deferido (Sessão 06).
+- **Veredito**: **GATE PASS** → GO para Sessão 11 (ciclo completo: máquina de estados +
+  proof of delivery).
+
 ### Sessão 09 — Bid engine (scoring + seleção + `claim_delivery` atômico) — PASS
 
 - **ADR-014** escrito **antes** do código (1 RPC system-only D1, fluxo D2, candidatos

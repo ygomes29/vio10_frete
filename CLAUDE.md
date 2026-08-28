@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante (até ADR-014) |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-015) |
 
 ## Estado atual
 
@@ -200,7 +200,25 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   runtime (lições Sessão 07/08 — ambiguidade `as t` e PostGIS em `extensions` — aplicadas
   proativamente). `searching_driver → assigned` só via `select_winner_and_claim` →
   `claim_delivery`.
-- **Próxima**: Sessão 10 — atribuição atômica em **concorrência real** (harness via
-  `dblink`/paralelismo, greenfield, ADR-007) — **GATE de produção**.
+- **Sessão 10 (concluída)**: Atribuição atômica em concorrência real — **GATE de produção
+  PASS** (ADR-007/ADR-015). Invariante ≤1 `delivery_assignment` ativa por `delivery_request`
+  validada em **concorrência real** (backends concorrentes em conexões separadas, não
+  single-transaction). Mecanismo do harness: **curls paralelos ao Management API**
+  (`dblink_connect_u` negado/não-superuser; senha nunca na linha de comando — verificado
+  empiricamente: N curls paralelos rodam concorrentemente). 5 runs × 3 races (A: 2
+  `claim_delivery` paralelos → 1 `won`+1 `not_searching_driver`; B: 2
+  `select_winner_and_claim` paralelos → 1 `won`+1 `round_not_open`; C: SWAC vs claim direto
+  → 1 vencedor) — todas sustentaram `n_assign=1, n_won=1, assigned, closed`. **Achado D4**:
+  lock-ordering `claim_delivery`(delivery→round-update) ↔ SWAC(round→delivery) — deadlock
+  latente (40P01, reproduzido no Test C run 2, invariante sobreviveu); **não-hazard vivo**
+  (`claim_delivery` só roda dentro de SWAC, mesma tx); hardening adiado (dívida técnica
+  observada). **Sem migration/schema/RPC/grant novo** — Sessão 10 é validação. Harness
+  commitado: `supabase/tests/concurrency_harness.sh` + `concurrency_setup.sql`. Hardening:
+  reset via SQL + replay 0001→0024 (24/24); invariants 13/13, rpcs 48/48, authz 21/21,
+  auth_lifecycle 34/34, creation 37/37, pricing 62/62, dispatch 65/65, bid 61/61 PASS
+  (regressão). Bug de harness corrigido (poluição cross-run via longitude compartilhada →
+  offset 1°/run; invariante núcleo nunca violado).
+- **Próxima**: Sessão 11 — ciclo completo (máquina de estados pós-`assigned` + proof of
+  delivery).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.
