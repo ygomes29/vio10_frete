@@ -2,6 +2,107 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 12] — 2026-08-28 — POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage)
+
+### Adicionado
+- **ADR-017** — POD completo: OTP do recebedor, gate de geolocalização, gate de pickup POD,
+  Storage `pod-photos`. D1 ciclo de vida do OTP em tabela dedicada `delivery_otps` (hash
+  salt+sha256, TTL, lockout, geração system-only, validação no submit com `for update`,
+  match consume na mesma tx do insert); D2 gate de geo (configurável via
+  `metadata.geo_tolerance_m`, default 200m, `st_distance`, skip se POD sem location);
+  D3 gate de pickup POD em `at_pickup→picked_up`; D4 verificação do recebedor = OTP match
+  (foto = evidência, either-or preservado); D5 bucket `pod-photos` privado + RLS INSERT p/
+  driver com assignment ativa; D6 camada externa especificada (n8n/WhatsApp), validação
+  live deferida; D7 sem coluna `verified` (gates enforce na transição); D8 split 0027/0028
+  (gotcha `ALTER TYPE ADD VALUE` in-tx); D9 ator via `auth.uid()`.
+- **Migration 0027** (`0027_pod_completo_prep.sql`) — schema prep: enum `otp_generated`,
+  tabela `delivery_otps` (unique `delivery_request_id`, delivery-only; hash/salt/expires/
+  attempts/max_attempts/consumed_at), index, RLS + SELECT policy `delivery_otps_sel`,
+  grants (service_role all, authenticated select under RLS, anon nada), helper
+  `is_assigned_driver_of(uuid)` SECURITY DEFINER stable, bucket `pod-photos` (privado,
+  50MiB, png/jpeg) com `on conflict do nothing`, RLS policy `pod_photos_insert` em
+  `storage.objects` p/ authenticated. **Sem função que referencie o enum novo** (D8).
+- **Migration 0028** (`0028_pod_completo_rpcs.sql`) — 4 RPCs `SECURITY DEFINER`:
+  - `generate_delivery_otp(uuid, int default 900, int default 5, uuid default
+    gen_random_uuid())` → `table(ok, reason, otp_code)` — **system-only** (5º), gera código
+    6 dígitos crypto (`gen_random_bytes`), hash salt+sha256 (`pgcrypto`), upsert em
+    `delivery_otps`, emite `otp_generated`, retorna plaintext só ao caller system.
+  - `submit_proof_of_delivery(...)` — assinatura **inalterada**, adiciona validação de OTP
+    contra `delivery_otps` (`for update`, `otp_not_generated`/`otp_expired`/
+    `otp_max_attempts`/`otp_already_used`/`otp_invalid`, match → `consumed_at=now()` na
+    mesma tx) quando `pod_type='delivery' and p_otp_code is not null`; foto-only pula.
+  - `confirm_delivery(uuid, int default null, uuid default gen_random_uuid())` →
+    `table(ok, reason, pod_id)` — assinatura **mudou** (drop da 2-param antes do create);
+    system-only inalterado; novo `p_geo_tolerance_m` repassado em `metadata.geo_tolerance_m`.
+  - `transition_delivery(...)` — assinatura **inalterada**, `search_path` agora
+    `public, extensions, pg_catalog` (PostGIS); adiciona gate de pickup POD
+    (`pickup_pod_required`) e gate de geo (`pod_geolocation_out_of_range`, default 200m,
+    skip se sem location).
+- **Testes** — `supabase/tests/test_vio10_pod_completo.sql` (novo, 40 asserções): OTP
+  geração/validação/lockout/expirado/regeneração, replay (otp_already_used +
+  pod_already_submitted), geo gate (dentro/fora/sem-location/default), pickup gate,
+  confirm_delivery geo param, Storage estrutural. Regressão: `test_vio10_lifecycle.sql`
+  (T1 + T3/T10-T20 inserem pickup POD antes de `picked_up`; 65→67), `test_vio10_rpcs.sql`
+  (TR6 pickup POD; 48 mantido).
+- **Docs** — `DELIVERY_LIFECYCLE.md` (POD two-phase profundidade Sessão 12), `DECISIONS.md`
+  (ADR-017 + decisões), `BACKEND.md` §4.7, `SECURITY.md` (OTP lifecycle, geo gate, pickup
+  gate, Storage, 5º system-only), `N8N_WORKFLOWS.md` (workflow #13 entrega concluída),
+  `DATACRAZY_INTEGRATION.md` (receiver-OTP), `GEOLOCATION.md` (geo gate do POD).
+
+### Decisões
+- **Escopo "DB completo + especificar externa"** (decisão do usuário): o repo não tem
+  camada de aplicação (sem Next.js, sem n8n, sem WhatsApp). Live-validar a entrega real via
+  WhatsApp e o workflow n8n é impossível neste ambiente; a regra mestra proíbe simular PASS.
+  Decisão: construir a camada DB/RPC completa + especificar (docs + RPCs que a camada
+  externa consome) a camada n8n/WhatsApp, marcando validação live como **deferida**.
+- **Gate de geolocalização: tolerância configurável, gate duro** (decisão do usuário):
+  `metadata.geo_tolerance_m` (default 200m); gate duro quando há location; skip quando não
+  há (GPS de PWA impreciso). Endurecer para exigir location fica para sessão posterior.
+- **Sem coluna `verified` no POD** (D7): os gates (OTP + geo + pickup) enforce na
+  transição; `delivered` só se todos passarem. Coluna redundante — schema mínimo.
+- **5º RPC system-only** (`generate_delivery_otp`): o código de verificação do recebedor é
+  da plataforma, não do driver — um driver gerando o OTP veria o código e forjaria a
+  "verificação". `authenticated` nem EXECUTE recebe.
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- Reset via SQL + replay 0001→0028 = **28/28 limpo** (sem MIGFAIL). `'otp_generated'`
+  referenciável em 0028; bucket `pod-photos` criado; policy `pod_photos_insert` aplicada.
+- Inventário: **27 tabelas** (`delivery_otps` nova), RLS 27/27, `anon`=0 em public.
+  `generate_delivery_otp` system-only (5º; execute só `service_role`).
+  `confirm_delivery` 3-param (2-param dropped). `submit_proof_of_delivery`/`transition_delivery`
+  refinadas (grants inalterados). Bucket `pod-photos` (privado) + policy `pod_photos_insert`.
+- **10 suítes PASS** (não simulado): invariants 13, rpcs 48, authz 21, auth_lifecycle 34,
+  creation 37, pricing 62, dispatch 65, bid 61, lifecycle 67, pod_completo 40.
+- **Storage RLS comportamental + camada n8n/WhatsApp NÃO validados live** — declarado
+  explicitamente (não simulado). Storage: só validação estrutural (bucket + policy via
+  `storage.buckets`/`pg_policies`); comportamental fica para Sessões 17-19 (app Next.js +
+  Storage API). n8n workflow #13 + envio OTP via WhatsApp: especificados em docs; live
+  deferido para Sessões 14 (n8n) + 15-16 (WhatsApp/DataCrazy).
+- Veredito **GO → Sessão 13** (n8n: arquitetura dos workflows).
+
+### Corrigido (durante a validação real)
+- **Bug de teste `pod_completo` C1 (lógica, não RPC):** C1 esperava
+  `pod_already_submitted` no 2º submit delivery com OTP, mas o 2º submit reusa o OTP já
+  consumido → o bloco de validação OTP roda **antes** do insert do POD → retorna
+  `otp_already_used` primeiro (comportamento correto do RPC). Reescrito C1 em 3 passos:
+  C1a_first=submitted, C1b_otp_already_used (OTP consumido primeiro), C1c_pod_already_submitted
+  (3º submit foto-only bypassa OTP gate → bate unique). 38→40 asserções, todas PASS. Nenhum
+  bug de RPC em runtime (lições Sessão 07/08 — ambiguidade `as t` + PostGIS em `extensions`
+  — aplicadas proativamente).
+- **Regressão de gates:** pickup gate (D3) quebra `lifecycle` T1/T3/T10-T20 + `rpcs` TR6
+  (agora `at_pickup→picked_up` exige pickup POD). Corrigido inserindo pickup POD antes das
+  transições `picked_up`. Geo gate (D2) não quebra testes existentes (submetem POD sem
+  location → skip).
+
+### Não implementado (fora do escopo, deferido)
+- **Live n8n** (workflow #13 implementado, instância provisionada) → Sessão 14.
+- **Live WhatsApp/DataCrazy** (OTP entregue de verdade ao recebedor) → Sessões 15-16.
+- **App Next.js** (Route Handlers, frontend, Storage API exercitável) → Sessões 17-19.
+- **Exigir location no delivery POD** (endurecer geo gate de skip→hard-required) → sessão
+  posterior (MVP skip quando sem GPS).
+- **Storage RLS comportamental** → Sessões 17-19 (requer app Next.js + Storage API).
+- **Hardening do lock-ordering** `claim_delivery`↔SWAC (dívida ADR-015 D4) → independente.
+
 ## [Sessão 11] — 2026-08-28 — Ciclo completo (máquina de estados pós-`assigned` + POD gate)
 
 ### Adicionado

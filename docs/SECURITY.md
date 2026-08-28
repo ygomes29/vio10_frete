@@ -73,28 +73,33 @@ Regras:
    RLS, o backend também não concede.
 5. **RPCs system-only** (`create_quote` Sessão 07 ADR-012 D1; `open_dispatch_round`
    Sessão 08 ADR-013 D2; `select_winner_and_claim` Sessão 09 ADR-014 D1; `confirm_delivery`
-   Sessão 11 ADR-016 D4): RPCs que **não aceitam caller autenticado de forma alguma** —
-   `auth.uid() IS NOT NULL` → `not_authorized`. `revoke all from public` + `grant execute
-   to service_role` **somente**: `authenticated` **nem EXECUTE** recebe (defesa em
-   profundidade — bloqueio no nível de privilégio antes da checagem interna de
-   `auth.uid()`); `anon`: nada. **Trust boundary dos insumos de pricing** (`create_quote`):
-   distância/duração são do provider de rota (plataforma, Sessão 20), não do business — um
-   business passando `p_distance_meters` forjaria distância pequena → preço baixo. **Trust
-   boundary dos insumos de dispatch** (`open_dispatch_round`): raio/max_candidates/
-   driver_offer/janela são do orquestrador (backend), não do business — um business
-   passando `p_search_radius_m`/`p_driver_offer_cents` forjaria a busca/oferta. **Trust
-   boundary dos pesos de scoring** (`select_winner_and_claim`): os pesos de scoring vêm do
-   backend (config do orquestrador), não do business — um business passando
-   `p_weight_price`/`p_weight_distance` forjaria o vencedor. **Trust boundary do POD**
-   (`confirm_delivery`): a confirmação da entrega é ato do sistema (valida o POD + transita
-   `delivered`), não do driver — o driver submete a evidência (`submit_proof_of_delivery`,
-   driver-scoped); o sistema confirma. Em produção, **n8n** chama `confirm_delivery`
-   (webhook sobre `pod_submitted`); pré-n8n, o backend/service layer. O dashboard
-   "solicitar cotação"/"abrir despacho"/"fechar rodada"/"confirmar entrega" chama um Route
-   Handler do backend, que chama a RPC system-scoped (Sessão 18). Distinto de
+   Sessão 11 ADR-016 D4; `generate_delivery_otp` Sessão 12 ADR-017 D1): RPCs que **não
+   aceitam caller autenticado de forma alguma** — `auth.uid() IS NOT NULL` →
+   `not_authorized`. `revoke all from public` + `grant execute to service_role`
+   **somente**: `authenticated` **nem EXECUTE** recebe (defesa em profundidade — bloqueio no
+   nível de privilégio antes da checagem interna de `auth.uid()`); `anon`: nada. **Trust
+   boundary dos insumos de pricing** (`create_quote`): distância/duração são do provider de
+   rota (plataforma, Sessão 20), não do business — um business passando `p_distance_meters`
+   forjaria distância pequena → preço baixo. **Trust boundary dos insumos de dispatch**
+   (`open_dispatch_round`): raio/max_candidates/driver_offer/janela são do orquestrador
+   (backend), não do business — um business passando `p_search_radius_m`/
+   `p_driver_offer_cents` forjaria a busca/oferta. **Trust boundary dos pesos de scoring**
+   (`select_winner_and_claim`): os pesos de scoring vêm do backend (config do orquestrador),
+   não do business — um business passando `p_weight_price`/`p_weight_distance` forjaria o
+   vencedor. **Trust boundary do POD** (`confirm_delivery`): a confirmação da entrega é ato
+   do sistema (valida o POD + transita `delivered`), não do driver — o driver submete a
+   evidência (`submit_proof_of_delivery`, driver-scoped); o sistema confirma. **Trust
+   boundary da geração do OTP** (`generate_delivery_otp`, Sessão 12): o código de
+   verificação do recebedor é gerado pelo sistema e devolvido **só** ao caller system — o
+   backend o encaminha via WhatsApp ao `delivery_contact_phone`; o driver **não** vê o código
+   antes do recebedor (um driver gerando o OTP veria o código e poderia forjar a "verificação"
+   do recebedor). Em produção, **n8n** chama `confirm_delivery` (webhook sobre
+   `pod_submitted`); pré-n8n, o backend/service layer. O dashboard "solicitar cotação"/"abrir
+   despacho"/"fechar rodada"/"confirmar entrega"/"gerar OTP" chama um Route Handler do
+   backend, que chama a RPC system-scoped (Sessão 18). Distinto de
    `create_delivery_request`/`confirm_quote`/`submit_proof_of_delivery` (aceitam membro de
-   org/driver): os endereços da corrida são do business; a distância, os insumos de
-   dispatch, os pesos de scoring e a confirmação de entrega são da plataforma.
+   org/driver): os endereços da corrida são do business; a distância, os insumos de dispatch,
+   os pesos de scoring, a confirmação de entrega e o OTP do recebedor são da plataforma.
 
 ### Auth de usuários — identidade, convite e atribuição de papel (Sessão 05, ADR-010)
 
@@ -289,6 +294,74 @@ EXECUTE em `transition_delivery`/`submit_proof_of_delivery` + SELECT sob RLS (00
   (D9): enum `pod_submitted` + unique em 0025 (sem funções), RPCs em 0026 — evita o gotcha
   `ALTER TYPE ... ADD VALUE` in-tx.
 
+### POD completo — OTP do recebedor, gate de geo, gate de pickup, Storage (Sessão 12, ADR-017)
+
+Estende o POD two-phase da Sessão 11 com a **verificação do recebedor (OTP)**, **gate de
+geolocalização** e **gate de pickup POD**. **Uma tabela nova** (`delivery_otps`);
+**nenhuma coluna nova** em `proof_of_delivery` (D7 — os gates enforce na transição, uma
+coluna `verified` seria redundante). Via RPC `SECURITY DEFINER` (Modelo B);
+`authenticated` só EXECUTE em `submit_proof_of_delivery`/`transition_delivery` + SELECT
+sob RLS em `delivery_otps`; `anon`: nada.
+
+- **Ciclo de vida do OTP — hash salt+sha256, TTL, lockout (D1)**: o código de 6 dígitos é
+  gerado com crypto (`gen_random_bytes`) e armazenado **só** como `sha256(code || salt)` em
+  `delivery_otps` (`salt = gen_random_bytes(8)` por linha) — o plaintext **nunca** persiste.
+  `unique (delivery_request_id)` (delivery-only; 1 OTP ativo por corrida). TTL default
+  900s (`expires_at`); lockout após `max_attempts` (default 5) tentativas erradas
+  (`attempts++`, `otp_max_attempts`). Match → `consumed_at=now()` (1 uso). Upsert
+  regenera (reseta `attempts`/`consumed_at`). Validação em `submit_proof_of_delivery` com
+  `select ... for update` (lock de linha contra race de submit concorrente) **antes** do
+  insert do POD; match consume na mesma tx do insert (atomicidade — OTP e POD ficam
+  consumidos/inseridos juntos, ou nada). Razões: `otp_not_generated`/`otp_expired`/
+  `otp_max_attempts`/`otp_already_used`/`otp_invalid`.
+- **Geração system-only (D9)**: `generate_delivery_otp` é o **5º system-only**. O código
+  devolvido **só** ao caller system (`auth.uid() IS NULL`) — o backend o encaminha via
+  WhatsApp ao `delivery_contact_phone`. Se o driver pudesse gerar o OTP, veria o código e
+  poderia forjar a "verificação" do recebedor. `authenticated` **nem EXECUTE** recebe; o
+  driver só submete (`submit_proof_of_delivery`), que valida o código contra o hash — nunca
+  recebe o plaintext.
+- **Verificação do recebedor = OTP match; foto = evidência (D4)**: delivery POD com
+  `otp_code` DEVE bater com um OTP gerado. Foto-only (`otp_code` null) é aceito (either-or,
+  back-compat Sessão 11) mas **não verifica** o recebedor — é evidência visual. A
+  profundidade Sessão 12: se `otp_code` vier, é validado de verdade (não texto livre como na
+  Sessão 11).
+- **Gate de geolocalização (configurável, duro) (D2)**: dentro de `transition_delivery` em
+  `in_transit→delivered`, após o gate de existência. `v_tol :=
+  nullif(metadata->>'geo_tolerance_m','')::int`, default 200m. Se o POD delivery tem
+  `location_point`, `v_dist := st_distance(pod_loc, delivery_point)`; se `> v_tol` →
+  `pod_geolocation_out_of_range` **sem mutar**. Se o POD **não tem location** → **skip**
+  (GPS de PWA é impreciso; não se valida o que não foi capturado). Gate duro **quando** há
+  localização; ausência aceita no MVP (endurecer para exigir location fica para sessão
+  posterior). Tolerância configurável via `confirm_delivery(p_geo_tolerance_m)` →
+  `metadata.geo_tolerance_m`.
+- **Gate de pickup POD (D3)**: dentro de `transition_delivery`, `at_pickup→picked_up`
+  exige POD `pod_type='pickup'` (senão `pickup_pod_required` sem mutar). Espelha o gate de
+  delivery — o driver submete o pickup POD antes de marcar `picked_up`.
+- **Storage `pod-photos` (privado, D5)**: bucket criado via migration (`public=false`,
+  `file_size_limit=50MiB`, `allowed_mime_types=['image/png','image/jpeg']`, guard `on
+  conflict do nothing`). RLS policy `pod_photos_insert` FOR INSERT TO authenticated WITH
+  CHECK (`bucket_id='pod-photos' and is_assigned_driver_of((storage.foldername(name))[1]
+  ::uuid)`) — helper `is_assigned_driver_of(uuid)` SECURITY DEFINER stable (bypassa RLS
+  dentro da policy de `storage.objects`, evita recursão). Path convencionado
+  `pod-photos/{delivery_request_id}/{pod_type}/{uuid}.ext`. **Sem** SELECT/UPDATE/DELETE p/
+  `authenticated` — reads só via **URL assinada** emitida pelo backend/service_role (o
+  driver envia o path no POD; quem lê a foto é o sistema, não o client anônimo). Default-
+  deny otherwise. **Validação comportamental de Storage RLS deferida** (Storage é API
+  separada, não exercitável via curl `/database/query`) — só validação **estrutural** (bucket
+  + policy existem) feita no replay; a validação comportamental fica para quando houver app
+  Next.js (Sessões 17-19) e Storage API exercitável.
+- **Sem novos grants de DML a `authenticated`** (D8): único grant novo em `public` é SELECT
+  em `delivery_otps` (under RLS). INSERT em `proof_of_delivery`/`delivery_otps` só via
+  DEFINER. `generate_delivery_otp`/`confirm_delivery` system-only (execute só
+  `service_role`); `submit_proof_of_delivery`/`transition_delivery` grants inalterados.
+  **Split 0027/0028** (D9): enum `otp_generated` + `delivery_otps` + bucket em 0027 (sem
+  funções), RPCs em 0028 — evita o gotcha `ALTER TYPE ... ADD VALUE` in-tx.
+- **Camada externa (n8n/WhatsApp): validação live deferida** (D6): `generate_delivery_otp`
+  é DB (construído/validado). O Route Handler de confirm, o workflow n8n #13 e o envio do
+  OTP via WhatsApp são **especificados** (docs) — não live-validados (não há n8n/WhatsApp
+  provisionados). Não simulado (regra mestra). Live-validação: Sessões 14 (n8n) + 15-16
+  (WhatsApp/DataCrazy).
+
 ### Concorrência real — GATE de produção (Sessão 10, ADR-015)
 
 - **Invariante ADR-007 (≤1 `delivery_assignment` ativa por `delivery_request`) validada
@@ -366,6 +439,13 @@ tabela de domínio.
 - **Supabase Storage** com **policies privadas**.
 - Uploads autorizados e validados (tipo/tamanho). Nada de dados desnecessários.
 - URLs assinadas/efêmeras para acesso.
+- **Bucket `pod-photos`** (Sessão 12, ADR-017 D5): privado (`public=false`),
+  `file_size_limit=50MiB`, `allowed_mime_types=['image/png','image/jpeg']`. RLS INSERT p/
+  `authenticated` (`pod_photos_insert`) via helper `is_assigned_driver_of` (assignment
+  ativa). Path `pod-photos/{delivery_request_id}/{pod_type}/{uuid}.ext`. Reads só via URL
+  assinada (backend/service_role); default-deny otherwise. **Validação comportamental de
+  Storage RLS deferida** (Storage é API separada, não exercitável via curl) — validação
+  estrutural feita no replay; live fica para Sessões 17-19 (app Next.js).
 
 ## Secrets / env
 

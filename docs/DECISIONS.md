@@ -27,6 +27,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-014 | Bid engine (scoring + seleção + `claim_delivery` atômico, `searching_driver → assigned`) | Aprovado (Sessão 09) |
 | ADR-015 | Harness de concorrência real (GATE de produção, ADR-007) | Aprovado (Sessão 10) |
 | ADR-016 | Ciclo completo pós-`assigned` + POD gate (matriz ator×transição, two-phase POD) | Aprovado (Sessão 11) |
+| ADR-017 | POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage) | Aprovado (Sessão 12) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -129,6 +130,78 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 12 — POD completo: OTP do recebedor, gate de geo, gate de pickup POD, Storage (ADR-017)
+
+- **Escopo: DB completo + especificar externa** (decisão do usuário): construir a camada
+  DB/RPC completa e validá-la real no dev; especificar (docs + RPCs que a camada externa
+  consome) a camada n8n/WhatsApp, marcando validação live como **deferida** (sem simular
+  PASS — regra mestra). "Tudo agora" no máximo viável neste ambiente (sem n8n/WhatsApp/app).
+- **Ciclo de vida do OTP em tabela dedicada `delivery_otps`** (D1): OTP **pré-gerado** (antes
+  do submit); sistema gera código de 6 dígitos (crypto `gen_random_bytes`), armazena **hash
+  salt+sha256** (`pgcrypto`), `expires_at` (TTL default 900s), `max_attempts` (default 5),
+  `attempts`, `consumed_at`. Unique `(delivery_request_id)` (delivery-only). Geração
+  **system-only** via `generate_delivery_otp` (driver não vê o código antes do recebedor;
+  RPC retorna plaintext só ao caller system). Validação em `submit_proof_of_delivery`
+  quando `pod_type='delivery' and p_otp_code is not null`: `select ... for update` →
+  `otp_not_generated`/`otp_expired`/`otp_max_attempts`/`otp_already_used`/`otp_invalid`
+  (hash não bate → `attempts++`). Match → `consumed_at=now()` na mesma tx do insert
+  (atomicidade). **Verificação do recebedor = OTP match.**
+- **Gate de geolocalização (configurável, duro)** (D2): dentro de `transition_delivery` em
+  `in_transit→delivered`, após o gate de existência. `v_tol :=
+  nullif(metadata->>'geo_tolerance_m','')::int`, default 200m. Se POD tem `location_point`,
+  `v_dist := st_distance(pod_loc, delivery_point)`; se `> v_tol` →
+  `pod_geolocation_out_of_range` sem mutar. Se POD **sem location** → **skip** (GPS de PWA é
+  impreciso; não se valida o que não foi capturado). Gate duro **quando** há localização;
+  ausência aceita no MVP (endurecer para exigir location fica para sessão posterior).
+  `confirm_delivery` recebe `p_geo_tolerance_m int default null` e repassa em
+  `metadata.geo_tolerance_m`.
+- **Gate de pickup POD em `at_pickup→picked_up`** (D3): espelha o gate de delivery.
+  `transition_delivery`: se `picked_up` e não existe POD `pickup` → `pickup_pod_required`
+  sem mutar. Driver submete pickup POD antes de `picked_up`. Pickup POD não-transita.
+- **Verificação do recebedor = OTP; foto = evidência** (D4): delivery POD com `otp_code`
+  DEVE bater com OTP gerado; foto-only aceito mas não verifica recebedor. Either-or
+  preservado (back-compat Sessão 11); profundidade Sessão 12: se otp_code vier, é validado
+  de verdade (não texto livre).
+- **Bucket Storage `pod-photos` (privado) + RLS INSERT** (D5): migration cria
+  `insert into storage.buckets` (`public=false`, `file_size_limit=50MiB`,
+  `allowed_mime_types=['image/png','image/jpeg']`) com `on conflict do nothing`. RLS policy
+  INSERT em `storage.objects` p/ `authenticated`: path convencionado
+  `pod-photos/{delivery_request_id}/{pod_type}/{uuid}.ext`; policy verifica via helper
+  `is_assigned_driver_of(...)` SECURITY DEFINER (bypassa RLS, evita recursão). Sem
+  SELECT/UPDATE/DELETE p/ authenticated (reads via URL assinada; default-deny).
+  **Validação comportamental de Storage RLS deferida** (Storage é API separada, não
+  exercitável via curl `/database/query`); validação **estrutural** (bucket criado, policy
+  existe) feita no replay.
+- **Camada externa especificada, validação live deferida** (D6): `generate_delivery_otp`
+  (system-only, D1) é a RPC que o backend consome para obter o código a enviar via WhatsApp
+  — **construído e validado** (é DB). Route Handler contract `POST /api/internal/deliveries/
+  {id}/confirm` (system-scoped, chama `confirm_delivery`) — **especificado** (app Next.js
+  não existe). Workflow n8n #13 (`entrega concluída`): trigger `pod_submitted` → Route
+  Handler confirm (auto-confirm) — **especificado** em `N8N_WORKFLOWS.md`. Envio do OTP via
+  WhatsApp/DataCrazy — **especificado** em `DATACRAZY_INTEGRATION.md` (seção receiver-OTP).
+  Todos marcados "validação live deferida — requer n8n provisionado (Sessão 14) + WhatsApp
+  provisionado (Sessões 15-16)".
+- **Sem coluna `verified`** (D7): gates enforce na transição; `delivered` só se todos
+  passarem. Coluna seria redundante. Schema mínimo: **nenhuma** coluna nova em
+  `proof_of_delivery`. Único acréscimo de tabela: `delivery_otps`.
+- **Split 0027/0028** (D8): mesmo gotcha `ALTER TYPE ADD VALUE` in-tx (ADR-016 D9). 0027
+  (enum `otp_generated` + `delivery_otps` + bucket/policies, **sem** função que referencie o
+  enum) e 0028 (RPCs que referenciam `'otp_generated'`). Cada migration = transação separada.
+- **Ator via `auth.uid()`** (D9): `generate_delivery_otp` **system-only** (auth.uid not
+  null → `not_authorized`; execute só `service_role` — **5º system-only**).
+  `submit_proof_of_delivery` driver/system (inalterado). `confirm_delivery` system-only
+  (inalterado). Eventos: `otp_generated` (actor system), `pod_submitted` (metadata inclui
+  `otp_consumed=true|false`), `delivered` (existente).
+- **Callers internos preservados**: `create_quote`/`confirm_quote`/`confirm_delivery`
+  chamam `transition_delivery` com assinatura inalterada — novos gates (pickup + geo) são
+  condicionais ao `p_to_status` e não os afetam. `claim_delivery`/SWAC **não** chamam
+  `transition_delivery` — GATE Sessão 10 íntegro (validado: bid 61/61, dispatch 65/65,
+  sem regressão).
+- **Validação real (dev `rtoyfiqngyicqtuzwfhz`, nunca produção)**: reset/replay 0001→0028
+  (28/28 limpo); 10 suítes PASS (invariants 13, rpcs 48, authz 21, auth_lifecycle 34,
+  creation 37, pricing 62, dispatch 65, bid 61, lifecycle 67, pod_completo 40). Storage RLS
+  comportamental + n8n/WhatsApp **não validados live** (declarado; não simulado).
 
 ### Sessão 11 — Ciclo completo pós-`assigned` + POD gate (ADR-016)
 

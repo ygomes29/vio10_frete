@@ -6,6 +6,86 @@
 
 ## Histórico
 
+### Sessão 12 — POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage, ADR-017) — PASS (com ressalva)
+
+- **ADR-017** escrito **antes** do código (D1 OTP em `delivery_otps`, D2 gate de geo
+  configurável, D3 gate de pickup POD, D4 verificação do recebedor = OTP match, D5 Storage
+  `pod-photos`, D6 camada externa especificada/deferida, D7 sem coluna `verified`, D8 split
+  0027/0028, D9 ator via `auth.uid()`) — regra mestra respeitada. "IA não inventa status"
+  mantido: `delivered` continua system-only via `confirm_delivery` (POD gate de existência +
+  novo gate de geo); o driver submete evidência, o sistema confirma. **Submeter POD ≠
+  entregue** preservado (análogo a ACEITAR ≠ GANHAR, ADR-006).
+- **0027** — schema prep (sem funções que referenciem o enum novo): `alter type
+  delivery_event_type add value 'otp_generated'`; `create table delivery_otps` (unique
+  `delivery_request_id`, delivery-only; hash/salt/expires/attempts/max_attempts/consumed_at;
+  checks `attempts>=0`, `max_attempts>=1`); index; RLS + SELECT policy `delivery_otps_sel`
+  (`can_view_delivery_request`); grants (service_role all, authenticated select under RLS,
+  anon nada); helper `is_assigned_driver_of(uuid)` SECURITY DEFINER stable (bypassa RLS
+  para a policy de Storage, evita recursão); bucket `pod-photos` (privado, 50MiB, png/jpeg)
+  com `on conflict do nothing`; RLS policy `pod_photos_insert` em `storage.objects` p/
+  authenticated. Sem função que referencie `'otp_generated'` — evita o gotcha
+  `ALTER TYPE ... ADD VALUE` in-tx (mesmo padrão 0025/0026).
+- **0028** — 4 RPCs `SECURITY DEFINER`:
+  - `generate_delivery_otp` (nova, **system-only** — 5º): código 6 dígitos crypto
+    (`gen_random_bytes`, bigint p/ evitar overflow int), hash salt+sha256 (`pgcrypto`),
+    upsert em `delivery_otps` (reseta `attempts`/`consumed_at`/`expires_at`), emite
+    `otp_generated` (actor system), retorna plaintext **só** ao caller system. `auth.uid()
+    is not null` → `not_authorized`; execute só `service_role` (defesa em profundidade).
+    O driver não vê o código antes do recebedor — um driver gerando o OTP forjaria a
+    "verificação" do recebedor. **Trust boundary do OTP** (D1/D9): código é da plataforma.
+  - `submit_proof_of_delivery` (refinada, assinatura **inalterada**): adiciona validação de
+    OTP contra `delivery_otps` com `select ... for update` (lock de linha contra race) antes
+    do insert; match → `consumed_at=now()` na mesma tx do insert (atomicidade — OTP e POD
+    consumidos/inseridos juntos, ou nada). Razões: `otp_not_generated`/`otp_expired`/
+    `otp_max_attempts`/`otp_already_used`/`otp_invalid` (hash não bate → `attempts++`).
+    Foto-only pula validação OTP (either-or preservado).
+  - `confirm_delivery` (refinada, assinatura **mudou**): `drop function if exists
+    confirm_delivery(uuid, uuid)` antes do create (evita overload órfão); novo
+    `p_geo_tolerance_m int default null` repassado em `metadata.geo_tolerance_m`. System-only
+    inalterado.
+  - `transition_delivery` (refinada, assinatura **inalterada**): `search_path` agora
+    `public, extensions, pg_catalog` (PostGIS `st_distance`). Gate de pickup POD em
+    `at_pickup→picked_up` (`pickup_pod_required`); gate de geo em `in_transit→delivered`
+    após o gate de existência (`pod_geolocation_out_of_range`, default 200m via
+    `metadata.geo_tolerance_m`, skip se POD sem location). Matriz ator×transição, limite
+    reatribuição, reasons, eventos inalterados. Callers internos preservados
+    (`create_quote`/`confirm_quote`/`confirm_delivery` — gates condicionais ao
+    `p_to_status`); `claim_delivery`/SWAC não chamam `transition_delivery` — GATE Sessão 10
+    íntegro.
+- **Sem coluna `verified` (D7):** gates enforce na transição; `delivered` só se todos
+  passarem. Schema mínimo: nenhuma coluna nova em `proof_of_delivery`. Único acréscimo de
+  tabela: `delivery_otps`. Sem novos grants de DML a `authenticated` (só SELECT em
+  `delivery_otps` under RLS).
+- **Testes** — `test_vio10_pod_completo.sql` (novo, 40 asserções): OTP geração (system-only,
+  wrong_state, regeneração, evento), validação (match/invalid/max_attempts/expired/
+  not_generated/foto-only), replay (otp_already_used + pod_already_submitted), geo gate
+  (dentro/fora/sem-location/default 200m @ 150m ok / 300m out), pickup gate, confirm_delivery
+  geo param, Storage estrutural. Regressão: `lifecycle` T1 + T3/T10-T20 (pickup POD antes de
+  `picked_up`; 65→67), `rpcs` TR6 (pickup POD; 48 mantido). Isolamento por longitude (lição
+  Sessão 09/10/11). Bug de teste C1 corrigido (lógica, não RPC: 2º submit reusa OTP consumido
+  → `otp_already_used` antes de `pod_already_submitted`; reescrito em 3 passos).
+- **Validação real (dev `rtoyfiqngyicqtuzwfhz`, nunca produção):** reset/replay 0001→0028
+  (28/28 limpo); 10 suítes PASS (invariants 13, rpcs 48, authz 21, auth_lifecycle 34,
+  creation 37, pricing 62, dispatch 65, bid 61, lifecycle 67, pod_completo 40). Inventário:
+  27 tabelas, RLS 27/27, `anon`=0, `generate_delivery_otp` system-only (5º),
+  `confirm_delivery` 3-param (2-param dropped), bucket `pod-photos` + policy
+  `pod_photos_insert` (estrutural).
+- **Ressalva explícita (regra mestra — não simular PASS):**
+  - **Storage RLS comportamental** NÃO validado live — Storage é API separada, não exercitável
+    via curl `/database/query` (Management API rola com role que bypassa RLS). Só validação
+    estrutural (bucket + policy existem). Comportamental fica para Sessões 17-19 (app Next.js
+    + Storage API).
+  - **Camada n8n/WhatsApp** NÃO live-validada — workflow #13 (entrega concluída) e envio do
+    OTP via WhatsApp são **especificados** em docs (`N8N_WORKFLOWS.md`, `DATACRAZY_INTEGRATION.md`);
+    a RPC `generate_delivery_otp` que o backend consome está implementada e validada (é DB).
+    Live-validação: Sessões 14 (n8n) + 15-16 (WhatsApp/DataCrazy).
+- **Riscos:** offboarding/revogação de papel/membership (`remove_platform_role`,
+  `remove_org_member`) ainda deferido (lado driver FECHADO desde Sessão 06). Lock-ordering
+  `claim_delivery`↔SWAC (Sessão 10 D4) — dívida técnica observada, não-hazard vivo, hardening
+  adiado. Exigir location no delivery POD (endurecer geo gate skip→hard-required) — sessão
+  posterior. Nenhum novo risco aberto na Sessão 12.
+- **Veredito**: GO para Sessão 13 (n8n: arquitetura dos workflows).
+
 ### Sessão 11 — Ciclo completo (máquina de estados pós-`assigned` + POD gate, ADR-016) — PASS
 
 - **ADR-016** escrito **antes** do código (matriz ator×transição D1, limite de reatribuição

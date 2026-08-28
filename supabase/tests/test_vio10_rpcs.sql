@@ -333,6 +333,10 @@ delete from trans_res;
 insert into trans_res select * from public.transition_delivery((select v::uuid from rpc_ids where k='dr_trans'),'at_pickup');
 select is((select ok from trans_res), true, 'TR5: driver_to_pickup->at_pickup ok');
 delete from trans_res;
+-- Sessão 12 (ADR-017 D3): at_pickup->picked_up agora exige pickup POD (gate). Teste roda
+-- como owner; insere POD direto para satisfazer o gate (não produz delivery_event).
+insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+  values((select v::uuid from rpc_ids where k='dr_trans'), 'pickup'::public.pod_type, 'pod/p.jpg');
 insert into trans_res select * from public.transition_delivery((select v::uuid from rpc_ids where k='dr_trans'),'picked_up');
 select is((select ok from trans_res), true, 'TR6: at_pickup->picked_up ok');
 delete from trans_res;

@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante (até ADR-015) |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-017) |
 
 ## Estado atual
 
@@ -241,7 +241,35 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   Sessão 06 reconfirmada: cada bloco autenticado reseta JWT para `'{}'` antes dos helpers,
   seta o ator, reseta antes de system-only). `test_vio10_rpcs` TR8 ajustado (POD gate exige
   POD antes de `in_transit→delivered`).
-- **Próxima**: Sessão 12 — POD completo (foto em Storage, OTP ao recebedor via WhatsApp,
-  geolocation, verificação do recebedor, gating de pickup POD, auto-confirm orquestrado).
+- **Sessão 12 (concluída)**: POD completo (OTP do recebedor, gate de geo, gate de pickup POD,
+  Storage) — **PASS (com ressalva)**. 28 migrations (**0027** schema prep — enum `otp_generated`
+  + tabela `delivery_otps` (unique `delivery_request_id`, delivery-only; hash salt+sha256,
+  TTL, lockout) + RLS/grants + helper `is_assigned_driver_of` + bucket `pod-photos` (privado)
+  + policy `pod_photos_insert` em `storage.objects`; **0028** 4 RPCs DEFINER). ADR-017 (D1
+  OTP em `delivery_otps` com geração **system-only** `generate_delivery_otp` (5º system-only;
+  código crypto 6 dígitos, hash salt+sha256, upsert, emite `otp_generated`; driver não vê o
+  código antes do recebedor — trust boundary do OTP) + validação no `submit_proof_of_delivery`
+  com `for update` (match → `consumed_at=now()` na mesma tx do insert; foto-only pula);
+  D2 gate de geo em `in_transit→delivered` (configurável via `metadata.geo_tolerance_m`,
+  default 200m, `st_distance`, skip se POD sem location); D3 gate de pickup POD em
+  `at_pickup→picked_up` (`pickup_pod_required`); D4 verificação do recebedor = OTP match
+  (foto = evidência, either-or preservado); D5 Storage `pod-photos` privado + RLS INSERT
+  p/ driver com assignment ativa; D6 camada externa n8n/WhatsApp **especificada**, validação
+  live **deferida** (sem simular PASS); D7 sem coluna `verified`; D8 split 0027/0028
+  (gotcha enum-add-value in-tx); D9 ator via `auth.uid()`). `confirm_delivery` assinatura
+  **mudou** (drop 2-param antes do create; novo `p_geo_tolerance_m`). `transition_delivery`
+  assinatura inalterada (`search_path` agora `public, extensions, pg_catalog`; +gate pickup
+  +gate geo). `submit_proof_of_delivery` assinatura inalterada (+validação OTP). Callers
+  internos preservados; GATE Sessão 10 íntegro. Hardening: reset via SQL + replay 0001→0028
+  limpo (28/28); invariants 13/13, rpcs 48/48, authz 21/21, auth_lifecycle 34/34, creation
+  37/37, pricing 62/62, dispatch 65/65, bid 61/61, lifecycle 67/67 (pickup POD antes de
+  `picked_up`), pod_completo 40/40 PASS — **10/10 suítes, 418 asserções, sem regressão**.
+  Bug de teste corrigido (C1: 2º submit reusa OTP consumido → `otp_already_used` antes de
+  `pod_already_submitted`; reescrito em 3 passos). **Ressalva (regra mestra)**: Storage RLS
+  comportamental + camada n8n/WhatsApp **não validados live** (Storage é API separada, não
+  exercitável via curl — só estrutural; n8n #13 + envio OTP especificados em docs; live
+  Sessões 14/15-16/17-19). Não simulado.
+- **Próxima**: Sessão 13 — n8n: arquitetura dos workflows (design dos 16 workflows,
+  trigger/input/validações/operações/chamadas ao backend/eventos/retries/idempotência).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

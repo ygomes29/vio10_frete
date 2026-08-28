@@ -200,6 +200,9 @@ begin
   perform pg_temp.cr('T1a_d2p','transitioned', r.reason);
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
   perform pg_temp.cr('T1b_atp','transitioned', r.reason);
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   perform pg_temp.cr('T1c_pku','transitioned', r.reason);
   select * into r from public.transition_delivery(v_dr, 'in_transit');
@@ -236,6 +239,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   select * into r from public.transition_delivery(v_dr, 'delivered');
@@ -375,6 +381,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   select * into r from public.submit_proof_of_delivery(v_dr, 'delivery'::public.pod_type, 'pod/d.jpg', null, 'Receiver', null, null, null, null);
@@ -395,6 +404,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d1))::text, true);  -- driver d1
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   v_d2 := pg_temp.mk_driver('t11d2@c.local','T11 D2','1102', 11.0 + 0.01);  -- driver sem assignment
@@ -414,6 +426,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   select * into r from public.submit_proof_of_delivery(v_dr, 'delivery'::public.pod_type, null, null, null, null, null, null, null);
@@ -431,6 +446,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   select * into r from public.submit_proof_of_delivery(v_dr, 'delivery'::public.pod_type, 'pod/d.jpg', null, 'Receiver', null, null, null, null);
@@ -463,6 +481,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver: avança + submete
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   select * into r from public.submit_proof_of_delivery(v_dr, 'delivery'::public.pod_type, 'pod/d.jpg', null, 'Receiver', null, null, null, null);
@@ -485,6 +506,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver: avança (sem POD)
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   perform set_config('request.jwt.claims', '{}'::text, true);  -- system: confirma sem POD
@@ -504,6 +528,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver: avança + POD
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   select * into r from public.submit_proof_of_delivery(v_dr, 'delivery'::public.pod_type, 'pod/d.jpg', null, 'Receiver', null, null, null, null);
@@ -523,6 +550,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver: avança até picked_up
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   perform set_config('request.jwt.claims', '{}'::text, true);  -- system: insere POD + confirma
   insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path, receiver_name)
@@ -542,6 +572,9 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver: avança (sem POD)
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
+  -- Sessão 12 (ADR-017 D3): picked_up exige pickup POD (gate).
+  insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path)
+    values (v_dr, 'pickup'::public.pod_type, 'pod/p.jpg');
   select * into r from public.transition_delivery(v_dr, 'picked_up');
   select * into r from public.transition_delivery(v_dr, 'in_transit');
   perform set_config('request.jwt.claims', '{}'::text, true);  -- system: delivered direto sem POD
@@ -560,12 +593,16 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.drv_user(v_d))::text, true);  -- driver
   select * into r from public.transition_delivery(v_dr, 'driver_to_pickup');
   select * into r from public.transition_delivery(v_dr, 'at_pickup');
-  select * into r from public.transition_delivery(v_dr, 'picked_up');
+  -- Sessão 12 (ADR-017 D3): pickup POD submetido ANTES de picked_up (gate exige). Submeter
+  -- POD não transita (status permanece at_pickup); só transition_delivery('picked_up') transita.
   select * into r from public.submit_proof_of_delivery(v_dr, 'pickup'::public.pod_type, 'pod/p.jpg', null, null, null, null, null, null);
   perform pg_temp.cr('T20_pickup_submit','submitted', r.reason);
-  perform pg_temp.cr('T20_no_transition','picked_up', pg_temp.dr_status(v_dr));
+  perform pg_temp.cr('T20_no_transition','at_pickup', pg_temp.dr_status(v_dr));
   perform pg_temp.cr('T20_ev_pod','t', pg_temp.has_event(v_dr,'pod_submitted'));
   perform pg_temp.cr('T20_pod_pickup','t', pg_temp.pod_exists(v_dr,'pickup'));
+  select * into r from public.transition_delivery(v_dr, 'picked_up');
+  perform pg_temp.cr('T20_then_picked_up','transitioned', r.reason);
+  perform pg_temp.cr('T20_status','picked_up', pg_temp.dr_status(v_dr));
 end $$;
 
 -- ============================ T21: cancel/fail reason capturado de metadata ============================

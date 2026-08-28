@@ -32,6 +32,17 @@ em `delivery_requests`, e `proof_of_delivery`; índices GiST. Consulta de candid
 > "geography" does not exist`). RPCs que não usam PostGIS usam
 > `set search_path = public, pg_catalog`.
 
+> **Sessão 12 (ADR-017 D2) — gate de geolocalização do POD:** `transition_delivery` em
+> `in_transit→delivered` compara o `location_point` do POD de delivery ao
+> `delivery_point` da corrida via `st_distance(geography, geography)` (metros). Tolerância
+> configurável via `metadata.geo_tolerance_m` (default 200m, repassado por
+> `confirm_delivery(p_geo_tolerance_m)`); excedida → `pod_geolocation_out_of_range` sem
+> mutar. Se o POD **não tem location** (GPS indisponível, submit OTP-only sem coords) →
+> **skip** do gate (GPS de PWA é impreciso; não se valida o que não foi capturado). Gate
+> duro **quando** há localização; ausência aceita no MVP (endurecer para exigir location
+> fica para sessão posterior). `transition_delivery` agora declara
+> `set search_path = public, extensions, pg_catalog` (PostGIS).
+
 ## Abstrações
 
 ```

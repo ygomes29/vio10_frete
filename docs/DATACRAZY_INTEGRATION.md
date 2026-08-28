@@ -58,6 +58,49 @@ responder. Ações: ACEITAR / FAZER LANCE / RECUSAR — via **link assinado + ex
 que chama o backend. **Não** expor dados pessoais do cliente antes da atribuição;
 após atribuir, liberar dados de execução.
 
+### Entrega do OTP ao recebedor (Sessões 15-16, ADR-017 D1/D6)
+
+> **Especificado** na Sessão 12 (a RPC `generate_delivery_otp` que o backend consome está
+> implementada e validada — 0028). **Implementação live deferida** para as Sessões 15-16
+> (requer WhatsApp/DataCrazy provisionado). Não simulado (regra mestra).
+
+**Objetivo:** entregar ao recebedor (`delivery_contact_phone`) o código de 6 dígitos que
+verifica que ele recebeu a encomenda. O driver **não** vê o código — ele coleta o código do
+recebedor no ato da entrega e o submete no POD.
+
+- **Trigger:** ao entrar `in_transit` (ou ao atribuir a corrida — decisão de orquestração,
+  Sessão 14), o backend chama `generate_delivery_otp(delivery_request_id, ttl_seconds?,
+  max_attempts?, correlation_id)` (system-scoped, Service Role). A RPC retorna
+  `(ok, reason, otp_code)` — o `otp_code` plaintext **só** ao backend; persiste só o hash
+  salt+sha256 em `delivery_otps`.
+- **Envio:** backend encaminha o código ao `delivery_contact_phone` via DataCrazy/WhatsApp
+  (mensagem tipo "Seu código de entrega ViO10 é 123456. Informe ao entregador na entrega.").
+  TTL default 900s; o recebedor tem 15 min para receber a encomenda e informar o código.
+- **Coleta:** o driver pergunta o código ao recebedor no ato da entrega e o submete via
+  `submit_proof_of_delivery(pod_type='delivery', p_otp_code=<código>)`. A RPC valida o
+  hash contra `delivery_otps` (`for update`) e consome o OTP na mesma tx do insert do POD.
+- **Falhas de OTP (tratamento):**
+  - código errado → `otp_invalid` (`attempts++`); após `max_attempts` (default 5) →
+    `otp_max_attempts` (locked). O driver pode pedir regeneração (backend chama
+    `generate_delivery_otp` de novo — upsert reseta `attempts`/`consumed_at`/`expires_at`).
+  - código expirado → `otp_expired`; regenerar.
+  - OTP nunca gerado (backend não enviou) → `otp_not_generated` no submit; o driver usa
+    foto-only (evidência sem verificação de recebedor) ou o backend regenera.
+- **Foto-only (fallback):** se o recebedor não recebeu o código (sem WhatsApp, número
+  errado), o driver pode submeter POD foto-only — aceito, mas **não verifica** o recebedor
+  (evidência visual). Either-or preservado (D4).
+- **Idempotência:** `generate_delivery_otp` é upsert em `delivery_otps` (`unique
+  delivery_request_id`) — regenerações sobrescrevem. `submit_proof_of_delivery` com OTP
+  match consome `consumed_at=now()` (1 uso); segundo submit bate `unique (delivery_request_id,
+  pod_type)` → `pod_already_submitted`.
+- **Invariantes específicos:**
+  - O código plaintext **nunca** transita por DataCrazy/IA além do envio ao recebedor — a IA
+    não "decide" o código, só o entrega como mensagem. O backend gera; a IA entrega.
+  - O `delivery_contact_phone` é o alvo fixo da corrida (definido na criação, 0007); a IA
+    não pode redirecionar o OTP a outro número.
+  - Logs de OTP: `correlation_id` + `delivery_request_id` + `otp_generated` event (actor
+    system); o plaintext **não** é logado (só o hash).
+
 ## Invariantes
 
 - Links de ação são **autenticados/assinados e expiráveis** (HMAC/JWT curto, escopo

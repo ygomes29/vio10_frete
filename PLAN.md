@@ -210,7 +210,7 @@
     permanece deferido (Sessão 06).
   - **Veredito**: **GATE PASS** → GO para Sessão 11 (ciclo completo: máquina de estados
     + proof of delivery).
-- **Sessão 11 (atual)**: Ciclo completo (máquina de estados pós-`assigned` + POD gate) —
+- **Sessão 11**: Ciclo completo (máquina de estados pós-`assigned` + POD gate) —
   **concluída — PASS**.
   - **26 migrations** em `supabase/migrations/` (0001-0024 + **0025** schema prep +
     **0026** 3 RPCs). **Nenhuma tabela/coluna nova**; enum `pod_submitted` + unique
@@ -246,8 +246,57 @@
     helpers, seta o ator, reseta antes de system-only). `test_vio10_rpcs` TR8 ajustado
     (POD gate).
   - **Veredito**: GO para Sessão 12 (POD completo: foto/OTP/geolocation/recebedor).
-- **Próxima**: Sessão 12 — POD completo (foto em Storage, OTP ao recebedor via WhatsApp,
-  geolocation, verificação do recebedor, gating de pickup POD, auto-confirm orquestrado).
+- **Sessão 12 (atual)**: POD completo (OTP do recebedor, gate de geo, gate de pickup POD,
+  Storage) — **concluída — PASS (com ressalva)**.
+  - **28 migrations** em `supabase/migrations/` (0001-0026 + **0027** schema prep +
+    **0028** 4 RPCs). **Uma tabela nova** (`delivery_otps`, delivery-only); **nenhuma
+    coluna nova** em `proof_of_delivery` (D7). Enum `otp_generated`.
+  - **ADR-017**: POD completo. D1 ciclo de vida do OTP em `delivery_otps` (hash salt+sha256,
+    TTL default 900s, lockout default 5, geração **system-only** via
+    `generate_delivery_otp`, validação no `submit_proof_of_delivery` com `for update`, match
+    consume na mesma tx do insert); D2 gate de geo em `in_transit→delivered`
+    (configurável via `metadata.geo_tolerance_m`, default 200m, `st_distance`, skip se POD
+    sem location); D3 gate de pickup POD em `at_pickup→picked_up` (`pickup_pod_required`);
+    D4 verificação do recebedor = OTP match (foto = evidência, either-or preservado); D5
+    bucket `pod-photos` privado + RLS INSERT p/ driver com assignment ativa (helper
+    `is_assigned_driver_of`); D6 camada externa (n8n #13 + WhatsApp OTP) **especificada**,
+    validação live **deferida** (sem simular PASS); D7 sem coluna `verified`; D8 split
+    0027/0028 (gotcha enum-add-value in-tx); D9 ator via `auth.uid()` (5º system-only).
+  - **0027** — schema prep (sem funções): enum `otp_generated` + tabela `delivery_otps`
+    (unique `delivery_request_id`) + RLS/grants + helper `is_assigned_driver_of` + bucket
+    `pod-photos` + policy `pod_photos_insert` em `storage.objects`.
+  - **0028** — 4 RPCs DEFINER: `generate_delivery_otp` (**nova, system-only** — 5º; código
+    6 dígitos crypto, hash salt+sha256, upsert, emite `otp_generated`), `submit_proof_of_delivery`
+    (**refinada**, assinatura inalterada; valida OTP contra `delivery_otps` com `for update`,
+    match → `consumed_at=now()` na mesma tx; foto-only pula), `confirm_delivery`
+    (**refinada**, assinatura mudou — drop 2-param antes do create; novo `p_geo_tolerance_m`
+    → `metadata.geo_tolerance_m`), `transition_delivery` (**refinada**, assinatura
+    inalterada; `search_path` agora `public, extensions, pg_catalog`; gate de pickup POD
+    + gate de geo). Grants: generate/confirm → service_role somente (system-only);
+    submit/transition → service_role+authenticated (inalterado).
+  - **Callers internos preservados**: `create_quote`/`confirm_quote`/`confirm_delivery`
+    chamam `transition_delivery` com assinatura inalterada — gates condicionais ao
+    `p_to_status`. `claim_delivery`/SWAC não chamam `transition_delivery` — GATE Sessão 10
+    íntegro.
+  - **Hardening — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` + replay **0001→0028 em ordem** → 28/28 limpo. Inventário: 27
+    tabelas (`delivery_otps` nova), RLS 27/27, `anon`=0, `generate_delivery_otp` system-only
+    (5º; execute só service_role), `confirm_delivery` 3-param (2-param dropped), bucket
+    `pod-photos` (privado) + policy `pod_photos_insert`.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**,
+    dispatch **65/65**, bid **61/61**, lifecycle **67/67** (pickup POD antes de `picked_up`),
+    pod_completo (novo) **40/40** — **10/10 suítes, 418 asserções, todas PASS (não
+    simulado)**. Bug de teste corrigido (C1: 2º submit reusa OTP consumido →
+    `otp_already_used` antes de `pod_already_submitted`; reescrito em 3 passos).
+  - **Ressalva (regra mestra — não simular PASS)**: **Storage RLS comportamental** não
+    validado live (Storage é API separada, não exercitável via curl; só validação
+    estrutural — bucket + policy). **Camada n8n/WhatsApp** não live-validada (workflow #13
+    + envio OTP especificados em docs; `generate_delivery_otp` é DB validado). Live: Sessões
+    14 (n8n) + 15-16 (WhatsApp) + 17-19 (app Next.js/Storage API).
+  - **Veredito**: GO para Sessão 13 (n8n: arquitetura dos workflows).
+- **Próxima**: Sessão 13 — n8n: arquitetura dos workflows (design dos 16 workflows,
+  trigger/input/validações/operações/chamadas ao backend/eventos/retries/idempotência).
 
 ## Roadmap (20 fases / 29 sessões)
 

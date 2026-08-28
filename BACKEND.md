@@ -69,7 +69,10 @@ valida). `authenticated` não recebe DML de domínio — só EXECUTE nas RPCs + 
   mutar); POD gate em `delivered` (`pod_required` sem POD delivery); `cancelled_reason`/
   `failed_reason` do `metadata->>'reason'`; `draft→cancelled` em M; supersede assignment
   ativa em reatribuição + `reassignment_count++`; insere `delivery_event`. Assinatura
-  inalterada (Sessão 03/04).
+  inalterada (Sessão 03/04). **Sessão 12 (ADR-017, 0028):** adiciona gate de pickup POD em
+  `at_pickup→picked_up` (`pickup_pod_required`) e gate de geolocalização em
+  `in_transit→delivered` (`pod_geolocation_out_of_range`, tolerância via
+  `metadata.geo_tolerance_m`, default 200m, skip se POD sem location) — ver §4.7.
 - `set_driver_availability(p_driver_id, p_status, p_reason)` — atualiza
   `drivers.current_availability_status` + append em `driver_availability` (log).
 
@@ -393,6 +396,98 @@ grants inalterados; `submit_proof_of_delivery` segue o padrão user-facing. **Sp
 0025/0026** (D9): enum `pod_submitted` + unique em 0025 (sem funções), RPCs em 0026 — evita
 o gotcha `ALTER TYPE ... ADD VALUE` in-tx (valor não referenciável na mesma transação).
 Confirmado: `'pod_submitted'` referenciável em 0026 no replay 26/26.
+
+### 4.7 RPCs de POD completo (Sessão 12, ADR-017)
+
+Implementadas em `supabase/migrations/0027_pod_completo_prep.sql` (schema prep: enum
+`otp_generated` + tabela `delivery_otps` + bucket `pod-photos` + policies em
+`storage.objects` — **sem** funções que referenciem o enum novo, evita o gotcha `ALTER TYPE
+... ADD VALUE` in-tx, mesmo padrão 0025/0026) e `0028_pod_completo_rpcs.sql` (4 RPCs).
+**Uma tabela nova** (`delivery_otps`); **nenhuma coluna nova** em `proof_of_delivery` (D7).
+Modelo B: `SECURITY DEFINER`; `authenticated` só EXECUTE nas RPCs user-facing + SELECT sob
+RLS em `delivery_otps`; `anon`: nada.
+
+- **`generate_delivery_otp(p_delivery_request_id uuid, p_ttl_seconds int default 900,
+  p_max_attempts int default 5, p_correlation_id uuid default gen_random_uuid())`** →
+  `table(ok boolean, reason text, otp_code text)`. `SECURITY DEFINER`,
+  `set search_path = public, extensions, pg_catalog`. **System-only** (D1/D9, **5º
+  system-only** após `create_quote`/`open_dispatch_round`/`select_winner_and_claim`/
+  `confirm_delivery`): `auth.uid() is not null` → `(false,'not_authorized',null)`. Valida
+  delivery existe + status em `('assigned','driver_to_pickup','at_pickup','picked_up',
+  'in_transit')` (senão `wrong_state`). Gera código 6 dígitos crypto: `v_bytes :=
+  gen_random_bytes(4)`; `v_raw := (get_byte(v_bytes,0)::bigint << 24) + ... `
+  (bigint evita overflow int); `v_code := lpad((v_raw % 1000000)::text, 6, '0')`. Salta:
+  `v_salt := encode(gen_random_bytes(8),'hex')`; `v_hash :=
+  encode(digest(v_code::bytea || v_salt::bytea, 'sha256'), 'hex')`. Upsert em
+  `delivery_otps` (`unique (delivery_request_id)`): seta `code_hash, salt,
+  expires_at=now()+p_ttl_seconds, attempts=0, max_attempts=p_max_attempts, consumed_at=null,
+  generated_at=now()` (regenera). Emite `delivery_events` `otp_generated` (actor system,
+  metadata `{ttl_seconds, max_attempts}`). Retorna `(true,'generated',v_code)` — o plaintext
+  **só** ao caller system (backend envia via WhatsApp ao `delivery_contact_phone`; o driver
+  não vê o código antes do recebedor). Grants: `service_role` **somente** (`authenticated`
+  sem EXECUTE — defesa em profundidade); `anon`: nada.
+- **`submit_proof_of_delivery(...)`** (refinada, assinatura **inalterada** — D1/D4): mesma
+  assinatura de 0026. Adiciona, **antes** do insert do POD, quando `p_pod_type='delivery'
+  and p_otp_code is not null`: valida contra `delivery_otps` (`select ... for update`) →
+  `otp_not_generated` (sem OTP) / `otp_expired` / `otp_max_attempts` (locked) /
+  `otp_already_used` (consumed) / `otp_invalid` (hash não bate → `attempts++`; se atingir
+  max → `otp_max_attempts`). Match → `consumed_at=now()` na **mesma tx** do insert
+  (atomicidade). Foto-only (`p_otp_code` null) pula validação OTP (either-or preservado —
+  OTP **verifica** o recebedor, foto é evidência). Resto inalterado (completude MVP, estado,
+  unique, evento `pod_submitted` com `metadata.otp_consumed`). Grants inalterados
+  (`service_role` + `authenticated`).
+- **`confirm_delivery(p_delivery_request_id uuid, p_geo_tolerance_m int default null,
+  p_correlation_id uuid default gen_random_uuid())`** (refinada, assinatura **mudou** —
+  D2): `drop function if exists public.confirm_delivery(uuid, uuid)` antes do `create`
+  (senão cria overload órfão). **System-only** inalterado. Valida POD delivery existe (senão
+  `pod_required`). Chama `transition_delivery(id,'delivered','system',null, jsonb_build_object(
+  'pod_id',v_pod_id) || (case when p_geo_tolerance_m is not null then
+  jsonb_build_object('geo_tolerance_m',p_geo_tolerance_m) else '{}'::jsonb end),
+  p_correlation_id) as t` (alias `t`). O `geo_tolerance_m` repassado em metadata é lido pelo
+  gate de geo da transição (default 200m se null). Grants: `service_role` **somente**.
+- **`transition_delivery(...)`** (refinada, assinatura **inalterada** — D2/D3): `set
+  search_path` agora `public, extensions, pg_catalog` (PostGIS `st_distance`). Após o POD
+  gate de existência em `in_transit→delivered`, adiciona **gate de geo** (D2): lê
+  `v_tol := nullif(p_metadata->>'geo_tolerance_m','')::int` (default 200m se null); se o POD
+  delivery tem `location_point`, `v_dist := st_distance(pod_loc, delivery_point)`; se
+  `v_dist > v_tol` → `(false,'pod_geolocation_out_of_range')` sem mutar; se POD sem location
+  → skip. Adiciona **gate de pickup POD** (D3) em `at_pickup→picked_up`: se não existe POD
+  `pod_type='pickup'` → `(false,'pickup_pod_required')` sem mutar. Resto inalterado (matriz
+  ator×transição, limite reatribuição, reasons, timestamps, eventos). Grants inalterados.
+  **Callers internos preservados:** `create_quote`/`confirm_quote`/`confirm_delivery`
+  chamam com assinatura inalterada — os novos gates são condicionais ao `p_to_status` e não
+  os afetam. `claim_delivery`/SWAC não chamam `transition_delivery` — GATE Sessão 10 íntegro.
+
+**Tabela `delivery_otps` (0027, nova)**: `id uuid pk default gen_random_uuid()`,
+`delivery_request_id uuid not null references delivery_requests(id) on delete restrict`,
+`code_hash text not null` (sha256(code||salt) em hex), `salt text not null`
+(`gen_random_bytes(8)` em hex, por linha), `expires_at timestamptz not null`,
+`attempts int not null default 0 check (>=0)`, `max_attempts int not null default 5 check
+(>=1)`, `consumed_at timestamptz`, `generated_at timestamptz not null default now()`,
+`created_at timestamptz not null default now()`, `unique (delivery_request_id)` (1 OTP
+ativo por corrida, delivery-only). RLS enable + SELECT policy `delivery_otps_sel`
+(`can_view_delivery_request`) p/ authenticated; writes só via DEFINER. Grants:
+`service_role` all; `authenticated` SELECT (under RLS); `anon`: nada.
+
+**Storage bucket `pod-photos` (0027, novo, privado)**: `insert into storage.buckets (id,
+name, public, file_size_limit, allowed_mime_types) values ('pod-photos','pod-photos',
+false, 52428800, array['image/png','image/jpeg']) on conflict (id) do nothing`. RLS policy
+`pod_photos_insert` FOR INSERT TO authenticated WITH CHECK (`bucket_id='pod-photos' and
+is_assigned_driver_of((storage.foldername(name))[1]::uuid)`) — helper
+`is_assigned_driver_of(uuid)` SECURITY DEFINER stable (bypassa RLS, evita recursão na
+policy de `storage.objects`). Path convencionado `pod-photos/{delivery_request_id}/
+{pod_type}/{uuid}.ext`. Sem SELECT/UPDATE/DELETE p/ authenticated (reads via URL assinada
+emitida pelo backend/service_role; default-deny). **Validação comportamental de Storage
+RLS deferida** (Storage é API separada, não exercitável via curl `/database/query`) — só
+validação **estrutural** (bucket + policy existem) feita no replay.
+
+**Sem novos grants de DML a `authenticated`** (D8): único grant novo em `public` é SELECT em
+`delivery_otps` (under RLS). INSERT em `proof_of_delivery`/`delivery_otps` só via DEFINER.
+`generate_delivery_otp`/`confirm_delivery` system-only (execute só `service_role`);
+`submit_proof_of_delivery`/`transition_delivery` grants inalterados. **Split 0027/0028**
+(D9): enum `otp_generated` + `delivery_otps` + bucket em 0027 (sem funções), RPCs em 0028 —
+evita o gotcha `ALTER TYPE ... ADD VALUE` in-tx. Confirmado: `'otp_generated'`
+referenciável em 0028 no replay 28/28.
 
 ## 5. Idempotência
 
