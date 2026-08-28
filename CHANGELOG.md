@@ -197,6 +197,63 @@ Formato: sessão + data + escopo.
   o remoto com segurança; apply incremental + inventário + testes = PASS real; o
   reset from-scratch fica como hardening final da Sessão 05). → **Sessão 05**.
 
+## [Sessão 05] — 2026-08-28 — Auth de usuários (Supabase Auth) + reset/replay from-scratch
+
+### Adicionado
+- **ADR-010** — ciclo de vida de identidade e autenticação (MVP). D1 email+senha;
+  D2 trigger `handle_new_user`; D3 convites `invitations`+`accept_invitation` (anon
+  não acessa; prova propriedade do email via login); D4 RPCs admin DEFINER; D4.1
+  `is_platform_admin()` ≠ `is_super_or_admin()` (visibilidade vs. autoridade); D5 JWT
+  DB-lookup sem custom claims; D6 cookie-based; D7 matriz de quem convida quem.
+- **Migration 0018** — trigger `handle_new_user` `SECURITY DEFINER` on `auth.users`
+  AFTER INSERT → `profiles` (`on conflict do nothing`). Garante FK de papéis/
+  memberships/drivers → `profiles(id)`. Padrão Supabase.
+- **Migration 0019** — `invitations` (RLS) + 6 RPCs `SECURITY DEFINER`:
+  `create_invitation`, `accept_invitation`, `cancel_invitation`,
+  `assign_platform_role`, `add_org_member`, `create_driver`. Helper `my_email()`
+  (DEFINER) e `is_super_or_admin()` (super/admin, exclui operator). Idempotentes
+  (`on conflict do nothing`); authz por `auth.uid()`. Grants least-privilege
+  (authenticated: EXECUTE + SELECT em invitations sob RLS, sem DML direto; anon: nada).
+- **`supabase/tests/test_vio10_auth_lifecycle.sql`** — 34 asserções (begin/rollback).
+- **`supabase/config.toml`** — `minimum_password_length=12`,
+  `password_requirements=lower_upper_letters_digits_symbols`,
+  `enable_anonymous_sign_ins=false`, `[auth.sms] enable_signup=false` (MVP).
+
+### Corrigido (durante a validação real)
+- **0019 `create_invitation`**: `returning token` ambíguo (output param `token` vs.
+  coluna) → alias `inv.token`. (42702)
+- **0019 autoridade de mutação**: RPCs de mutação usavam `is_platform_admin()` (que
+  inclui `operator`) → escalonamento de privilégio (operator atribuía papel, criava
+  driver, cancelava convite alheio). Corrigido para `is_super_or_admin()`
+  (super/admin). RLS de **visibilidade** de `invitations` mantém `is_platform_admin()`
+  (operator vê — leitura, ADR-009). (ADR-010 D4.1)
+- **`test_vio10_invariants.sql`**: `plan(12)` → `plan(13)` (rodava 13 asserções).
+- **`test_vio10_authz.sql`**: inserts manuais em `profiles` agora `on conflict do
+  nothing` (trigger 0018 cria o perfil; evita PK duplicada).
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- **Reset from-scratch** via SQL (`drop schema public cascade; delete from auth.users;
+  create schema public; grants`) + **replay 0001→0019 em ordem** — todos aplicam
+  limpo (19/19, sem MIGFAIL).
+- Inventário: 26 tabelas (incl. `invitations`), RLS em todas (26/26), trigger
+  `handle_new_user` presente, `anon`=0 grants.
+- `test_vio10_invariants.sql` → **13/13 PASS** (num_failed=0).
+- `test_vio10_rpcs.sql` → **48/48 PASS** (num_failed=0).
+- `test_vio10_authz.sql` → **21/21 PASS**.
+- `test_vio10_auth_lifecycle.sql` → **34/34 PASS** (T1–T19: trigger, convites, authz
+  do inviter, idempotência de accept, prova de email, expiração, driver via convite,
+  RLS de invitations, anon bloqueado).
+- Veredito **GO → Sessão 06**.
+
+### Notas de infra
+- Reset do dev feito via **SQL** (curl + Management API `/database/query`): não há
+  endpoint de reset a nível de projeto (só branch). `drop schema public cascade` +
+  `delete from auth.users` + recriar `public` funciona; o trigger em `auth.users`
+  sobrevive ao drop de `public` (vive no schema `auth`), e 0018 o recria idempotente.
+- Testes pgTAP (invariants/rpcs) executados wrapped em `begin;…rollback;` + veredicto
+  `num_failed()` (o endpoint só devolve o último resultset; `finish()` sozinho perdia
+  as linhas `ok`). authz/auth_lifecycle já consolidam resultado num único SELECT.
+
 ## [Sessão 01] — 2026-08-27 — Diagnóstico
 - Repositório confirmado greenfield.
 - Arquitetura proposta e aprovada com ajustes (ver Sessão 02).

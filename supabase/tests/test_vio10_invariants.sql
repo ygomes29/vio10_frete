@@ -5,7 +5,7 @@ set search_path to public, extensions;
 -- Executar com: supabase db test (local) ou contra projeto dev via execute_sql.
 -- Requer PostGIS (schema extensions) e pgTAP.
 
-select plan(12);
+select plan(13);
 
 -- ============================================================================
 -- Helpers (rolam back ao fim do teste; cada arquivo roda em sua própria txn).

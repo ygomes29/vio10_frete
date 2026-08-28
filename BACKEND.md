@@ -69,6 +69,51 @@ valida). `authenticated` não recebe DML de domínio — só EXECUTE nas RPCs + 
 Ainda não implementado (Sessão 09/10): `select_winner_and_claim(p_round_id)` —
 pontua/ordena candidatos e chama `claim_delivery`. Até lá, a seleção não existe.
 
+### 4.1 RPCs de identidade / convite (Sessão 05, ADR-010)
+
+Implementadas em `supabase/migrations/0018_handle_new_user.sql` (trigger) e
+`0019_invitations_roles.sql` (tabela + 6 RPCs + helpers). Seguem o **Modelo B**:
+`SECURITY DEFINER` + checagem interna de `auth.uid()`; `authenticated` sem DML
+direto em `invitations`/`user_platform_roles`/`organization_memberships`/`drivers`
+— só EXECUTE nas RPCs + SELECT em `invitations` sob RLS; `anon` nada.
+
+- **`handle_new_user()`** (trigger `SECURITY DEFINER` on `auth.users` AFTER INSERT):
+  cria a linha em `profiles(id = new.id, full_name/phone de new.raw_user_meta_data)`
+  com `on conflict (id) do nothing`. **Garante a FK** de
+  `user_platform_roles`/`organization_memberships`/`drivers` → `profiles(id)`
+  independentemente do caminho (signup direto, convite aceito, provisionamento
+  admin). **Não** atribui papel/membership/driver — isso é ato explícito via 0019.
+  Padrão Supabase.
+- **`create_invitation(p_email, p_role_type, p_organization_id, p_driver_meta)`** —
+  inviter autorizado cria um convite `pending` com `token`. **Não** cria `auth.users`
+  (o signup via Supabase Auth Admin API é responsabilidade do backend, fora do
+  escopo DB). Authz do inviter conforme matriz ADR-010 D7 (`is_super_or_admin()` para
+  papéis platform/driver; `business_owner` da própria org para `business_*`).
+- **`accept_invitation(p_token)`** — caller **autenticado** cujo email casa com
+  `invitations.email` (prova propriedade do email via login; `anon` não acessa).
+  Aplica o papel **idempotentemente** (`on conflict do nothing`); aceitar 2x →
+  `already_accepted` (não duplica). Marca `accepted`. Rejeita expirado
+  (`expires_at < now()` → `expired`) e já accepted.
+- **`cancel_invitation(p_invitation_id)`** — inviter ou admin. Só `pending`→`cancelled`.
+- **`assign_platform_role(p_user_id, p_role)`** — `super_admin`/`admin` (via
+  `is_super_or_admin()`). Idempotente (upsert).
+- **`add_org_member(p_user_id, p_organization_id, p_role)`** — `super_admin`/`admin`
+  **ou** `business_owner` da própria org. Idempotente (`UNIQUE(user_id, organization_id)`).
+- **`create_driver(p_user_id, p_full_name, p_phone)`** — `super_admin`/`admin`. Insert
+  em `drivers` (`account_status` default `pending`). Idempotente (`already_exists`).
+
+**Visibilidade vs. autoridade (ADR-010 D4.1):** a RLS de *visibilidade* de
+`invitations` usa `is_platform_admin()` (inclui `operator` — despacho cross-tenant,
+ADR-009). As 4 RPCs de **mutação** usam `is_super_or_admin()` (`super_admin`/`admin`,
+**exclui** `operator`) — reusar `is_platform_admin()` em mutação seria escalonamento
+de privilégio. Helper `my_email()` (DEFINER) resolve o email do caller para
+`accept_invitation` sem expor `auth.users` ao `authenticated`.
+
+**Ainda não implementado (Sessão 06+ offboarding):** `remove_platform_role`,
+`remove_org_member`, `deactivate_driver`, e limpeza assíncrona de convites
+expirados. `accept_invitation` já rejeita expirados; o modelo suporta revogação
+futura (`drivers.account_status`, delete em memberships).
+
 ## 5. Idempotência
 
 - Endpoints mutantes aceitam cabeçalho `Idempotency-Key`.

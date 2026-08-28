@@ -30,13 +30,14 @@ begin
   insert into public.businesses(organization_id,name) values(v_orgA,'BizA') returning id into v_bizA;
   insert into public.businesses(organization_id,name) values(v_orgB,'BizB') returning id into v_bizB;
 
-  -- 6 usuários (auth.users + profiles)
-  v_uA  := gen_random_uuid(); insert into auth.users(id,email) values(v_uA,  v_uA::text||'@t.local');  insert into public.profiles(id) values(v_uA);
-  v_uB  := gen_random_uuid(); insert into auth.users(id,email) values(v_uB,  v_uB::text||'@t.local');  insert into public.profiles(id) values(v_uB);
-  v_uD  := gen_random_uuid(); insert into auth.users(id,email) values(v_uD,  v_uD::text||'@t.local');  insert into public.profiles(id) values(v_uD);
-  v_uD2 := gen_random_uuid(); insert into auth.users(id,email) values(v_uD2,v_uD2::text||'@t.local'); insert into public.profiles(id) values(v_uD2);
-  v_uN  := gen_random_uuid(); insert into auth.users(id,email) values(v_uN,  v_uN::text||'@t.local');  insert into public.profiles(id) values(v_uN);
-  v_uAd := gen_random_uuid(); insert into auth.users(id,email) values(v_uAd,v_uAd::text||'@t.local'); insert into public.profiles(id) values(v_uAd);
+  -- 6 usuários (auth.users). A trigger handle_new_user (0018) cria profiles; o insert
+  -- manual abaixo é idempotente (on conflict) por compat/segurança.
+  v_uA  := gen_random_uuid(); insert into auth.users(id,email) values(v_uA,  v_uA::text||'@t.local');  insert into public.profiles(id) values(v_uA)  on conflict (id) do nothing;
+  v_uB  := gen_random_uuid(); insert into auth.users(id,email) values(v_uB,  v_uB::text||'@t.local');  insert into public.profiles(id) values(v_uB)  on conflict (id) do nothing;
+  v_uD  := gen_random_uuid(); insert into auth.users(id,email) values(v_uD,  v_uD::text||'@t.local');  insert into public.profiles(id) values(v_uD)  on conflict (id) do nothing;
+  v_uD2 := gen_random_uuid(); insert into auth.users(id,email) values(v_uD2,v_uD2::text||'@t.local'); insert into public.profiles(id) values(v_uD2) on conflict (id) do nothing;
+  v_uN  := gen_random_uuid(); insert into auth.users(id,email) values(v_uN,  v_uN::text||'@t.local');  insert into public.profiles(id) values(v_uN)  on conflict (id) do nothing;
+  v_uAd := gen_random_uuid(); insert into auth.users(id,email) values(v_uAd,v_uAd::text||'@t.local'); insert into public.profiles(id) values(v_uAd) on conflict (id) do nothing;
 
   -- papéis (platform_role enum: super_admin/admin/operator; driver NÃO entra aqui —
   -- motorista é identificado pela linha em drivers, via my_driver_id()).

@@ -42,9 +42,36 @@
     claim **4/4**; R16 cross-round **PASS**; concorrência **exatamente 1 vencedor**;
     inventário final consistente (26 RLS, 25 policies, 4 DEFINER, 5 helpers, anon=0).
   - Bypass da máquina de estados via PostgREST: **FECHADO**.
-- **Próxima**: Sessão 05 — Auth de usuários (Supabase Auth: login/registro/convite,
-  perfis, sessions, JWT) + reset/replay from-scratch da cadeia 0001→0017 (hardening
-  final via dashboard, pois CLI/MCP não resetam o remoto com segurança).
+- **Sessão 05 (atual)**: Auth de usuários (Supabase Auth) + reset/replay from-scratch —
+  **concluída — PASS**.
+  - **19 migrations** em `supabase/migrations/` (0001-0017 + **0018** trigger
+    `handle_new_user` + **0019** `invitations` + 6 RPCs de identidade/convite).
+  - **ADR-010**: ciclo de vida de identidade e auth (MVP) — email+senha, trigger de
+    perfil, convites via `invitations`+`accept_invitation` (anon não acessa; prova
+    propriedade do email via login), RPCs admin DEFINER, JWT DB-lookup sem custom
+    claims, cookie-based, matriz de quem convida quem.
+  - **0018 `handle_new_user`** (`SECURITY DEFINER` on `auth.users` AFTER INSERT →
+    `profiles`): garante FK de papéis/memberships/drivers → `profiles(id)`.
+  - **0019**: `invitations` (RLS) + 6 RPCs DEFINER (`create_invitation`,
+    `accept_invitation`, `cancel_invitation`, `assign_platform_role`,
+    `add_org_member`, `create_driver`) + helpers `my_email()`, `is_super_or_admin()`.
+  - **Bug de escalonamento de privilégio corrigido na validação**: mutação usava
+    `is_platform_admin()` (inclui `operator`) → `operator` atribuía papéis. Corrigido
+    para `is_super_or_admin()` (super/admin). Visibilidade mantém `is_platform_admin()`
+    (operator vê — leitura). ADR-010 D4.1.
+  - **`supabase/config.toml`**: senha forte (12, lower/upper/digits/symbols),
+    `enable_anonymous_sign_ins=false`, sem phone/SMS signup (MVP).
+  - **Hardening final — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` (via SQL + Management API; não há reset a nível de
+    projeto, só branch) + replay **0001→0019 em ordem** → 19/19 limpo. Inventário: 26
+    tabelas (incl. `invitations`), RLS 26/26, trigger presente, `anon`=0.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34** — todas PASS (não simulado). Risco
+    "reset/replay não executado" (BAIXO, Sessão 04) **FECHADO**.
+  - Revogação de papel / offboarding e limpeza assíncrona de convites expirados
+    **adiados** (Sessão 06+; `accept_invitation` já rejeita expirados).
+- **Próxima**: Sessão 06 — criação da corrida: empresas/entregadores/veículos +
+  `delivery_request` (Fase 2 do roadmap).
 
 ## Roadmap (20 fases / 29 sessões)
 

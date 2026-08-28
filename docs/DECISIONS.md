@@ -20,6 +20,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-007 | Atribuição atomicamente protegida pelo banco | Aprovado |
 | ADR-008 | Valores financeiros em centavos inteiros | Aprovado |
 | ADR-009 | Matriz RBAC (papel × recurso × ação) — escopo MVP | Aprovado (Sessão 04) |
+| ADR-010 | Ciclo de vida de identidade e autenticação (MVP) | Aprovado (Sessão 05) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -59,6 +60,28 @@ Aprovadas na Sessão 02 (2026-08-27).
 - **pgTAP server-side sem Docker**: runner próprio (temp table `_tap` + `num_failed()`
   + `begin/rollback` clean-slate) para executar testes via Management API quando Docker
   está ausente.
+
+## Decisões adicionais da Sessão 05 (auth/identidade, 2026-08-28)
+
+- **Auth method MVP = email + senha** (ADR-010 D1). phone/OTP e magic-link adiados para
+  o frontend (Sessões 17-19). `enable_anonymous_sign_ins = false`; senha forte (12,
+  lower/upper/digits/symbols) em `config.toml`.
+- **Criação de perfil via trigger `handle_new_user`** (ADR-010 D2, 0018): trigger
+  `SECURITY DEFINER` on `auth.users` AFTER INSERT cria row em `profiles`
+  (`on conflict do nothing`). Garante FK de `user_platform_roles`/
+  `organization_memberships`/`drivers` → `profiles(id)`. O trigger **não** atribui
+  papel/membership/driver (ato explícito via 0019). Padrão Supabase.
+- **Convites via `invitations` + `accept_invitation`** (ADR-010 D3, 0019): `anon` **não**
+  acessa — `accept_invitation` exige caller autenticado cujo email casa com o convite
+  (prova propriedade do email via login). Aplica papel idempotente (`on conflict do
+  nothing`); aceitar 2x → `already_accepted` (não duplica).
+- **`is_platform_admin()` ≠ `is_super_or_admin()`** (ADR-010 D4.1, 0019): visibilidade
+  (RLS) inclui `operator` (despacho cross-tenant, ADR-009); autoridade de **mutação**
+  (atribuir papel, criar driver, cancelar convite alheio) é `super_admin`/`admin` só
+  (helper `is_super_or_admin`). Reusar `is_platform_admin()` em mutação seria escalonamento
+  de privilégio do `operator`.
+- **JWT DB-lookup, sem custom claims** (ADR-010 D5): helpers `is_platform_admin`/
+  `my_org_ids`/`my_driver_id` resolvem o caller; nada em `auth.hook.custom_access_token`.
 
 ## Decisões ainda em aberto (a resolver nas próximas sessões)
 

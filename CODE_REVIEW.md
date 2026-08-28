@@ -6,6 +6,52 @@
 
 ## Histórico
 
+### Sessão 05 — Auth de usuários (Supabase Auth) + reset/replay from-scratch — PASS
+
+- **ADR-010** escrito **antes** do código (auth method, profile, convites, JWT,
+  session, matriz de quem convida quem) — regra mestra respeitada.
+- **0018 `handle_new_user`** (`SECURITY DEFINER` on `auth.users` AFTER INSERT →
+  `profiles`, `on conflict do nothing`): garante FK de `user_platform_roles`/
+  `organization_memberships`/`drivers` → `profiles(id)`. O trigger **não** atribui
+  papel (ato explícito via 0019). Sobrevive a `drop schema public cascade` (vive no
+  schema `auth`); 0018 o recria idempotente no replay.
+- **0019 `invitations` + 6 RPCs `SECURITY DEFINER`** (`create_invitation`,
+  `accept_invitation`, `cancel_invitation`, `assign_platform_role`,
+  `add_org_member`, `create_driver`) + helpers `my_email()`, `is_super_or_admin()`.
+  Idempotentes (`on conflict do nothing`); authz por `auth.uid()`. Grants
+  least-privilege (authenticated: EXECUTE + SELECT em `invitations` sob RLS, sem
+  DML direto; anon: nada).
+- **Bug real de escalonamento de privilégio encontrado e corrigido na validação**:
+  os 4 RPCs de **mutação** usavam `is_platform_admin()` (que inclui `operator`,
+  helper de *visibilidade* do ADR-009) → um `operator` podia atribuir papel a
+  terceiros, criar driver, cancelar convite alheio. Corrigido: mutação usa
+  `is_super_or_admin()` (`super_admin`/`admin`, exclui `operator`). RLS de
+  *visibilidade* de `invitations` mantém `is_platform_admin()` (operator vê —
+  leitura, ADR-009). Formalizado em ADR-010 D4.1. **Lição: V (visibilidade) ≠
+  C/X (autoridade de agir); um helper de RLS não deve ser reusado como helper de
+  authz de mutação sem confirmar a quem ele inclui.**
+- **`test_vio10_auth_lifecycle.sql`** (34 asserções, begin/rollback): trigger,
+  convites, authz do inviter, idempotência de accept, prova de email, expiração,
+  driver via convite, RLS de invitations, anon bloqueado. **34/34 PASS (real)**.
+- **`test_vio10_invariants.sql`**: `plan(12)`→`plan(13)` (rodava 13 asserções).
+- **Reset/replay from-scratch (hardening final)**: `drop schema public cascade` +
+  `delete from auth.users` + recriar `public` (via SQL + Management API; **não há**
+  endpoint de reset a nível de projeto — só branch) + replay **0001→0019 em ordem**
+  → todos aplicam limpo (19/19, sem MIGFAIL). Inventário: 26 tabelas (incl.
+  `invitations`), RLS em todas (26/26), trigger `handle_new_user` presente,
+  `anon`=0 grants.
+- **Suítes re-executadas após reset from-scratch**: invariants **13/13**, rpcs
+  **48/48**, authz **21/21**, auth_lifecycle **34/34** — todas PASS (não simulado).
+- ~~**Risco em aberto (BAIXO): reset/replay from-scratch da cadeia 0001→0017 não
+  executado**~~ → **FECHADO nesta sessão** (reset via SQL + replay 0001→0019
+  limpo). Risco original da Sessão 04 resolvido.
+- **Risco aberto (BAIXO)**: revogação de papel (`remove_platform_role`,
+  `remove_org_member`, `deactivate_driver`) e limpeza assíncrona de convites
+  expirados não existem — adiados (Sessão 06+ offboarding; ADR-010 "Fora do
+  escopo"). `accept_invitation` rejeita `expires_at < now()`; limpeza é otimização.
+- **Veredito**: GO para Sessão 06 (criação da corrida: empresas/entregadores/
+  veículos + `delivery_request`).
+
 ### Sessão 04 — Auth/Grants/RLS/RBAC (Modelo B) — PASS
 
 - **ADR-009** matriz RBAC escrita **antes** do código (grants/policies derivados da
@@ -34,11 +80,9 @@
 - **Risco aberto (BAIXO)**: bypass via PostgREST **FECHADO** (Modelo B + grants sem
   DML de domínio ao authenticated). Invariante imutabilidade `delivery_events` confirmado
   novamente (bloqueou DELETE de cleanup, mesmo para owner).
-- **Risco em aberto (BAIXO)**: reset/replay from-scratch da cadeia 0001→0017 não
-  executado — CLI `db push`/`db query` travou (prompt/lock); MCP não alcança o projeto
-  dev (conta diferente); dropar `public` no remoto é arriscado. Apply incremental +
-  inventário + testes = PASS real; reset from-scratch fica como hardening da Sessão 05
-  via dashboard.
+- ~~**Risco em aberto (BAIXO)**: reset/replay from-scratch da cadeia 0001→0017 não
+  executado~~ → **FECHADO na Sessão 05** (reset via SQL + Management API + replay
+  0001→0019 limpo; ver Sessão 05).
 - **Veredito**: GO para Sessão 05 (Auth de usuários Supabase + reset/replay from-scratch).
 
 ### Sessão 03.5 — Validação real da fundação (Gate B) — PASS
@@ -94,7 +138,11 @@
 
 ## Achados abertos
 
-(nenhum — código de negócio ainda não existe)
+- **Revogação de papel / offboarding** (BAIXO): `remove_platform_role`,
+  `remove_org_member`, `deactivate_driver` e limpeza assíncrona de convites
+  expirados não existem (Sessão 05 entregou atribuição, não revogação). Adiados para
+  Sessão 06+. `accept_invitation` já rejeita `expires_at < now()`; o modelo
+  (`drivers.account_status`, delete em memberships) suporta revogação futura.
 
 ## Classificação de severidade (a usar nas revisões)
 

@@ -107,7 +107,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/PRICING_ENGINE.md` | Pricing determinístico, composição do preço |
 | `docs/N8N_WORKFLOWS.md` | Mapa de workflows n8n |
 | `docs/DATACRAZY_INTEGRATION.md` | Limites DataCrazy/IA, fluxos WhatsApp |
-| `docs/SECURITY.md` | RLS, authz, idempotência, links assinados, secrets |
+| `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
 | `docs/adr/` | ADRs ADR-001 em diante |
@@ -128,7 +128,18 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   DEFINER). ADR-009 matriz RBAC. Grants least-privilege (0015). Validado real no dev:
   authz 21/21, system-path claim 4/4, R16 cross-round, concorrência exatamente 1
   vencedor, bypass PostgREST FECHADO, inventário consistente.
-- **Próxima**: Sessão 05 — Auth de usuários (Supabase Auth: login/registro/convite,
-  perfis, sessions, JWT) + reset/replay from-scratch da cadeia 0001→0017 (hardening).
+- **Sessão 05 (concluída)**: Auth de usuários (Supabase Auth) + reset/replay
+  from-scratch — **PASS**. 19 migrations (0018 trigger `handle_new_user` DEFINER on
+  `auth.users` AFTER INSERT → `profiles`; 0019 `invitations` + 6 RPCs DEFINER de
+  identidade/convite + helpers `my_email()`, `is_super_or_admin()`). ADR-010 (email+senha,
+  trigger de perfil, convites com prova de email via login, JWT DB-lookup sem custom
+  claims, cookie-based). `config.toml` (senha forte 12, sem anon/phone). Bug de
+  escalonamento de privilégio corrigido na validação: mutação usava `is_platform_admin()`
+  (inclui `operator`) → `is_super_or_admin()` (super/admin); visibilidade mantém
+  `is_platform_admin()` (ADR-010 D4.1). Hardening final: reset via SQL + replay
+  0001→0019 limpo (19/19); invariants 13/13, rpcs 48/48, authz 21/21, auth_lifecycle
+  34/34 PASS. Risco "reset/replay não executado" (Sessão 04) FECHADO.
+- **Próxima**: Sessão 06 — criação da corrida: empresas/entregadores/veículos +
+  `delivery_request` (Fase 2 do roadmap).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

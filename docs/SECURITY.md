@@ -72,13 +72,53 @@ Regras:
    a "promove" a system-scoped para contornar RLS. Se o usuário não teria direito via
    RLS, o backend também não concede.
 
+### Auth de usuários — identidade, convite e atribuição de papel (Sessão 05, ADR-010)
+
+- **Método de auth MVP**: email + senha (Supabase Auth, cookie-based server-side).
+  `enable_anonymous_sign_ins=false`; senha forte (`minimum_password_length=12`,
+  `lower_upper_letters_digits_symbols` em `config.toml`). Telefone/OTP e magic-link
+  **adiados** para a fase de frontend (Sessões 17-19); a camada DB de convites/papéis
+  é idêntica nos três métodos, então adiar não gera retrabalho. UI de auth (`@supabase/ssr`,
+  cookie wiring, telas por superfície) fica para as Sessões 17-19; nada no banco depende.
+- **Criação de perfil via trigger** (`handle_new_user`, 0018): `SECURITY DEFINER` on
+  `auth.users` AFTER INSERT → `profiles` (`on conflict do nothing`). **Garante a FK**
+  de `user_platform_roles`/`organization_memberships`/`drivers` → `profiles(id)` em
+  todo caminho (signup, convite aceito, provisionamento admin). O trigger **não**
+  atribui papel — ato explícito via 0019.
+- **Convite exige login (`anon` não acessa)**: `accept_invitation(p_token)` só roda
+  para um caller **autenticado** cujo email casa com `invitations.email`. A prova de
+  propriedade do email vem do login (Supabase Auth confirmou). Sem login, sem aceitar.
+  `anon` não recebe grants em `invitations` nem `EXECUTE` em `accept_invitation` —
+  bloqueado no nível de privilégio (defesa em profundidade **antes** da checagem
+  interna de `auth.uid()`).
+- **Idempotência de aceitar**: `accept_invitation` aplica o papel com
+  `on conflict do nothing` (`user_platform_roles`/`organization_memberships`; driver
+  via insert em `drivers` com `on conflict (user_id) do nothing`). Aceitar 2x →
+  `already_accepted`, **não duplica** memberships nem reabre o convite. Respeita a
+  regra de idempotência da regra mestra (§ Idempotência abaixo).
+- **Visibilidade ≠ autoridade (ADR-010 D4.1)**: a RLS de *visibilidade* de
+  `invitations` usa `is_platform_admin()` (inclui `operator` — despacho cross-tenant,
+  ADR-009). As 4 RPCs de **mutação** (`assign_platform_role`, `create_driver`,
+  `cancel_invitation`, `add_org_member` path platform) usam `is_super_or_admin()`
+  (`super_admin`/`admin`, **exclui** `operator`) — o operator **não** convida/atribui
+  (ADR-010 D7). Reusar `is_platform_admin()` em mutação seria escalonamento de
+  privilégio (um operator atribuiria papéis a terceiros). **Lição**: V (visibilidade)
+  e C/X (autoridade de agir) são eixos distintos; um helper de RLS não deve ser
+  reusado como helper de authz de mutação sem confirmar a quem ele inclui.
+- **JWT DB-lookup, sem custom claims**: as policies de RLS e a authz dos RPCs resolvem
+  o caller via `auth.uid()` + helpers DB-lookup (`is_platform_admin`, `my_org_ids`,
+  `my_driver_id`, `my_email`, `is_super_or_admin`). Nada em `auth.hook.custom_access_token`.
+  O token nunca mente sobre papéis (lê sempre o estado atual do banco); custom claims
+  exigiria reemitir tokens a cada mudança de papel.
+
 ## Idempotência
 
 - `idempotency_key` em endpoints mutantes; `external_event_id` por evento.
 - `integration_events(idempotency_key, source, external_event_id)` UNIQUE por origem.
 - `webhook_events(source, external_id)` UNIQUE → dedup de webhooks.
 - Aplica-se a: criação de pedido, confirmação de cotação, respostas a ofertas,
-  bids, claim, transições, webhooks, notificações, pagamentos futuros.
+  bids, claim, transições, webhooks, notificações, pagamentos futuros, e
+  **aceitar convite** (`accept_invitation` idempotente; ver ADR-010 D3).
 - **Retries são parte normal da arquitetura.**
 
 ### R17 — `external_reference` ≠ `idempotency_key` (conceitos distintos)
