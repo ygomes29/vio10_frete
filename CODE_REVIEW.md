@@ -6,6 +6,41 @@
 
 ## Histórico
 
+### Sessão 04 — Auth/Grants/RLS/RBAC (Modelo B) — PASS
+
+- **ADR-009** matriz RBAC escrita **antes** do código (grants/policies derivados da
+  spec, não inventados — regra mestra respeitada). Driver corrigido: não está em
+  `user_platform_roles` (identificado por linha em `drivers`).
+- **Modelo B (decisão de usuário)**: RPCs user-facing `SECURITY DEFINER` + checagem
+  interna de `auth.uid()`. **Reverte** INVOKER da Sessão 03. Descoberto na Sessão 04:
+  INVOKER exigiria DML a `authenticated`, abrindo bypass da máquina de estados via
+  PostgREST direto (`PATCH delivery_requests.status`). DEFINER + sem DML de domínio ao
+  `authenticated` fecha o buraco. `auth.uid()` funciona sob DEFINER (lê JWT).
+- **0016** aplicada (real): 4 RPCs confirmadas `SECURITY DEFINER`; grants PUBLIC
+  revogados; EXECUTE reaplicado conforme 0015.
+- **0017** aplicada (real): 25 policies + 5 helpers DEFINER (`is_platform_admin`,
+  `my_driver_id`, `my_org_ids`, `is_org_member`, `can_view_delivery_request`).
+- **`test_vio10_authz.sql` executado (real)**: **21/21 PASS** — cross-tenant (userA
+  vê 0 de orgB, userB 0 de orgA), isolamento de driver (driverD só reqA/own offer/own
+  row; driverD2 só reqB), papel sem policy vê 0 (userN), admin vê tudo (2/2/2), bypass
+  UPDATE bloqueado (`insufficient_privilege`), `respond_to_offer` bloqueia driver
+  errado (`not_authorized`) e permite o dono (`responded`).
+- **System-path (auth.uid null) preservado**: smoke `claim_delivery` 4/4; R16
+  cross-round PASS; **concorrência 2 claims paralelas → exatamente 1 `won=true`**
+  (B won, A `not_searching_driver`), nunca ambos — partial unique index + `FOR UPDATE`
+  intactos sob DEFINER.
+- **Inventário final (real)**: 26 tabelas com RLS, 25 policies, 4 RPCs DEFINER, 5
+  helpers, `authenticated` SELECT=20/INSERT=1/UPDATE=1/EXECUTE=8, `anon`=0.
+- **Risco aberto (BAIXO)**: bypass via PostgREST **FECHADO** (Modelo B + grants sem
+  DML de domínio ao authenticated). Invariante imutabilidade `delivery_events` confirmado
+  novamente (bloqueou DELETE de cleanup, mesmo para owner).
+- **Risco em aberto (BAIXO)**: reset/replay from-scratch da cadeia 0001→0017 não
+  executado — CLI `db push`/`db query` travou (prompt/lock); MCP não alcança o projeto
+  dev (conta diferente); dropar `public` no remoto é arriscado. Apply incremental +
+  inventário + testes = PASS real; reset from-scratch fica como hardening da Sessão 05
+  via dashboard.
+- **Veredito**: GO para Sessão 05 (Auth de usuários Supabase + reset/replay from-scratch).
+
 ### Sessão 03.5 — Validação real da fundação (Gate B) — PASS
 - **pgTAP executado (real)**: 12/12 invariantes PASS. Resolve o risco ALTO da Sessão 03
   (testes não executados). Executado server-side via Management API (sem Docker):

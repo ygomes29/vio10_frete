@@ -79,13 +79,25 @@ usuário aja como sistema, ou que o sistema vaze dados cross-tenant).
    input de usuário). Elas rodam system-scoped porque representam a plataforma, não um
    tenant. Ainda assim, escrevem via RPCs transacionais (`claim_delivery`,
    `transition_delivery`) — nunca SQL ad-hoc que ignore a máquina de estados.
-4. **RPCs são `SECURITY INVOKER`** (não `SECURITY DEFINER`). Logo, uma RPC roda com os
-   privilégios/RLS de **quem a chama**: chamada user-scoped → RLS aplica; chamada
-   system-scoped (service_role) → bypass. Nenhum atalho `DEFINER` para "furar" RLS.
-5. **service_role tem grants default-deny desde a Sessão 03.5** (0014): nem `anon`,
-   nem `authenticated`, nem `service_role` têm `SELECT/INSERT/EXECUTE` em `public` até
-   grants explícitos (Sessão 04). O backend system-scoped recebe grants por função
-   (least-privilege), não "tudo".
+4. **RPCs user-facing são `SECURITY DEFINER` com checagem interna de `auth.uid()`**
+   (Modelo B, Sessão 04 — reverte a decisão INVOKER da Sessão 03; ver ADR-009 e
+   `0016_rpcs_security_definer.sql`). A RPC roda como **owner** (postgres, bypassa
+   RLS) e valida posse/role do caller **internamente** lendo `auth.uid()` do JWT:
+   `auth.uid() IS NULL` → chamada system-scoped (service_role/owner), permitida;
+   `auth.uid() IS NOT NULL` → chamada user-scoped, valida `drivers.user_id = auth.uid()`
+   (motorista), membership da org (business) ou `user_platform_roles` (admin/operator).
+   **Por que não INVOKER:** com INVOKER as mutações internas da RPC rodariam como o
+   caller `authenticated`, exigindo grants de DML a `authenticated` — o que abre bypass da
+   máquina de estados via PostgREST direto (ex.: `PATCH delivery_requests.status` sem
+   passar por `transition_delivery`). Com DEFINER + sem grants de DML a `authenticated`,
+   a única forma de mutar estado é a RPC, que faz a checagem. `auth.uid()` funciona sob
+   DEFINER (lê o JWT, não o role do DB).
+5. **Grants são least-privilege desde a Sessão 04** (`0014` default-deny total +
+   `0015` least-privilege): `service_role` (system-scoped) recebe DML em todas as
+   tabelas + EXECUTE nas 4 RPCs; `authenticated` (user-scoped) recebe SELECT em 20
+   tabelas (sob RLS — `0017`) + EXECUTE nas 3 RPCs user-facing + INSERT/UPDATE só em
+   `driver_locations` (telemetria, sem regra a bypassar); `anon` nada. Nenhum DML de
+   domínio a `authenticated` — mutação user-face só via RPC DEFINER.
 
 ## 4. Fluxo de dados (caminho feliz)
 

@@ -129,9 +129,73 @@ Formato: sessão + data + escopo.
   `num_failed()` veredito + `begin/rollback` clean-slate.
 
 ### Não implementado (fora de escopo, conforme prompt)
-- Auth/RBAC, grants finais (least-privilege por função), policies RLS → **Sessão 04**.
 - `select_winner_and_claim` (scoring/atribuição automática) → Sessão 09/10.
 - Frontend, workflows n8n, integração DataCrazy → sessões futuras.
+
+## [Sessão 04] — 2026-08-28 — Auth/Grants/RLS/RBAC (Modelo B)
+
+### Decidido
+- **ADR-009**: matriz RBAC (6 papéis × recursos × ações) — spec fixa antes de
+  grants/policies, para não inventar permissões. Papéis: `super_admin`/`admin`/
+  `operator` (platform-scoped em `user_platform_roles`), `driver` (platform-scoped,
+  identificado por linha em `drivers` — **não** em `user_platform_roles`), e
+  `business_owner`/`business_user` (org-scoped em `organization_memberships`).
+- **Modelo B** (decisão de usuário via AskUserQuestion): RPCs user-facing viram
+  `SECURITY DEFINER` + checagem interna de `auth.uid()`. **Reverte** a decisão
+  INVOKER da Sessão 03. Motivo: INVOKER exigiria grants de DML a `authenticated`,
+  abrindo bypass da máquina de estados via PostgREST direto (PATCH em
+  `delivery_requests.status`). DEFINER + sem DML de domínio ao `authenticated` fecha
+  o buraco; `auth.uid()` funciona sob DEFINER (lê o JWT, não o role do DB).
+
+### Adicionado
+- `supabase/migrations/0016_rpcs_security_definer.sql`: recria as 4 RPCs
+  (`claim_delivery`, `respond_to_offer`, `transition_delivery`,
+  `set_driver_availability`) como `SECURITY DEFINER` com checagem `auth.uid()`:
+  `null` → system (service_role/owner), permitido; não-null → user, valida
+  `drivers.user_id = auth.uid()` (motorista), membership da org (business) ou
+  `user_platform_roles` (admin/operator). `transition_delivery` deriva o actor de
+  `auth.uid()` (não confia nos params). Revoga grants PUBLIC, reaplica EXECUTE
+  conforme 0015.
+- `supabase/migrations/0017_rls_policies.sql`: RLS policies de visibilidade (o "V"
+  da matriz ADR-009) + 5 helpers `SECURITY DEFINER` (`is_platform_admin`,
+  `my_driver_id`, `my_org_ids`, `is_org_member`, `can_view_delivery_request`).
+  Isolamento: business_* por `organization_id`; driver por offers/assignments
+  dirigidas a ele; platform admin vê tudo; user sem papel/membership/driver vê 0
+  (default-deny). Mutação direta do `authenticated` só em `driver_locations`
+  (telemetria, `driver_id = self`).
+- `supabase/tests/test_vio10_authz.sql`: 21 asserções de autorização (cross-tenant,
+  isolamento de driver, papel sem policy vê 0, admin cross-tenant, bypass UPDATE
+  bloqueado, `respond_to_offer` bloqueia driver errado, caminho legítimo ok).
+
+### Validado (real, no projeto dev `rtoyfiqngyicqtuzwfhz`, via Management API)
+- 0016 aplicada; 4 RPCs confirmadas `SECURITY DEFINER`.
+- 0017 aplicada; inventário final: 26 tabelas com RLS, 25 policies, 4 RPCs DEFINER,
+  5 helpers, `authenticated` SELECT=20 / INSERT=1 / UPDATE=1 / EXECUTE=8, `anon`=0.
+- `test_vio10_authz.sql`: **21/21 PASS**.
+- Caminho system (auth.uid null): smoke `claim_delivery` **4/4** (won, reason=won,
+  offer perdedora lost, delivery assigned).
+- R16 cross-round: **PASS** (offer aceita em rodada anterior vira lost após
+  atribuição oficial por outra rodada) — preservado sob DEFINER.
+- Concorrência: A e B em paralelo → **exatamente um** `won=true` (B), outro
+  `not_searching_driver`; nunca ambos. Partial unique index + FOR UPDATE intactos
+  sob DEFINER.
+- Bypass da máquina de estados via PostgREST direto: **FECHADO** (UPDATE em
+  `delivery_requests` por `authenticated` → `insufficient_privilege`).
+
+### Documentação
+- `docs/adr/ADR-009-matriz-rbac.md`: matriz + mapeamento (0016=RPCs DEFINER,
+  0017=RLS, 0015=grants).
+- `ARCHITECTURE.md` §3.1 regra 4 e 5 reescritas para Modelo B.
+- `docs/SECURITY.md` regra 2 e 3 reescritas para Modelo B.
+- `BACKEND.md` §4 e §6 atualizados.
+- `0013_rpcs.sql` marcado como SUPERSEDED por 0016.
+- `docs/DECISIONS.md`: ADR-009 indexado; nota Modelo B corrige "RPCs SECURITY
+  INVOKER".
+
+### Não implementado (próxima)
+- Reset/replay from-scratch da cadeia 0001→0017 via dashboard (CLI/MCP não resetam
+  o remoto com segurança; apply incremental + inventário + testes = PASS real; o
+  reset from-scratch fica como hardening final da Sessão 05). → **Sessão 05**.
 
 ## [Sessão 01] — 2026-08-27 — Diagnóstico
 - Repositório confirmado greenfield.

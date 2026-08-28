@@ -123,6 +123,12 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   default-deny confirmados. Correções: PostGIS search_path, 0014 endurecido (auto-grants
   Supabase), R16 cross-round, R17 (`external_reference` ≠ `idempotency_key`),
   `service_role` user-scoped vs system-scoped.
-- **Próxima**: Sessão 04 — Autenticação, RLS policies, grants least-privilege e RBAC.
+- **Sessão 04 (concluída)**: Auth/Grants/RLS/RBAC — **PASS (Modelo B)**. 17 migrations
+  (0016 RPCs `SECURITY DEFINER` + checagem `auth.uid()`; 0017 RLS policies + 5 helpers
+  DEFINER). ADR-009 matriz RBAC. Grants least-privilege (0015). Validado real no dev:
+  authz 21/21, system-path claim 4/4, R16 cross-round, concorrência exatamente 1
+  vencedor, bypass PostgREST FECHADO, inventário consistente.
+- **Próxima**: Sessão 05 — Auth de usuários (Supabase Auth: login/registro/convite,
+  perfis, sessions, JWT) + reset/replay from-scratch da cadeia 0001→0017 (hardening).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

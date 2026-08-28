@@ -41,8 +41,13 @@ externa viram funções transacionais no banco:
 
 ## 4. Funções RPC atômicas (Postgres) — estado da implementação
 
-Implementadas na Sessão 03 (`supabase/migrations/0013_rpcs.sql`), todas em
-`SECURITY INVOKER` + `search_path` fixo (nunca `SECURITY DEFINER` para bypassar RLS):
+Implementadas na Sessão 03 (`supabase/migrations/0013_rpcs.sql`) e convertidas para
+`SECURITY DEFINER` com checagem interna de `auth.uid()` na Sessão 04
+(`0016_rpcs_security_definer.sql`, Modelo B / ADR-009), com `search_path` fixo.
+**Por que DEFINER:** com INVOKER + grants de DML a `authenticated`, um motorista logado
+poderia mutar estado via PostgREST direto, furando a máquina de estados. DEFINER roda
+como owner e valida posse do caller via `auth.uid()` (null=system, permite; não-null=user,
+valida). `authenticated` não recebe DML de domínio — só EXECUTE nas RPCs + SELECT sob RLS.
 
 - `claim_delivery(p_delivery_request_id, p_driver_id, p_dispatch_round_id,
   p_delivery_offer_id, p_bid_id, p_correlation_id)` — atribuição atômica. `SELECT …
@@ -92,7 +97,8 @@ pontua/ordena candidatos e chama `claim_delivery`. Até lá, a seleção não ex
   operações do próprio sistema rodam **system-scoped** (`service_role`, bypass de
   RLS). `service_role` **nunca** vaza para n8n/DataCrazy/IA — eles chamam endpoints e
   o backend decide o contexto. O backend **não** promove ação de usuário a system-scoped
-  para furar RLS. RPCs são `SECURITY INVOKER` (herdam RLS de quem chama).
+  para furar RLS. RPCs user-facing são `SECURITY DEFINER` com checagem interna de
+  `auth.uid()` (Modelo B, Sessão 04; ver `ARCHITECTURE.md` §3.1).
 - Detalhes em `docs/SECURITY.md`.
 
 ## 7. Comunicação com n8n / DataCrazy

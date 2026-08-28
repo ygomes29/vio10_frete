@@ -26,8 +26,25 @@
     cross-round; R17 (`external_reference` ≠ `idempotency_key`); `service_role`
     user-scoped vs system-scoped.
   - Financeiro (payments/payouts/ledger) **adiado** à Sessão 21 (nenhuma FK atual depende).
-- **Próxima**: Sessão 04 — Autenticação, RLS e RBAC (grants least-privilege por
-  função/tabela + policies RLS + RBAC).
+- **Sessão 04 (atual)**: Auth/Grants/RLS/RBAC (Modelo B) — **concluída — PASS**.
+  - **17 migrations** em `supabase/migrations/` (0001-0015 da 03/03.5 + **0016** RPCs
+    `SECURITY DEFINER` + **0017** RLS policies).
+  - **ADR-009**: matriz RBAC (6 papéis × recursos × ações) — spec antes do código.
+  - **Modelo B** (decisão de usuário): RPCs user-facing `SECURITY DEFINER` +
+    checagem `auth.uid()` interna; reverte INVOKER da Sessão 03; fecha bypass da
+    máquina de estados via PostgREST.
+  - Grants least-privilege (0015): `service_role` DML + 4 RPCs; `authenticated`
+    SELECT(20) sob RLS + 3 RPCs user-facing + INSERT/UPDATE só em `driver_locations`;
+    `anon` nada.
+  - RLS policies (0017) + 5 helpers DEFINER: visibilidade por org/driver/admin;
+    default-deny; bypass UPDATE em `delivery_requests` bloqueado.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): authz **21/21 PASS**; system-path
+    claim **4/4**; R16 cross-round **PASS**; concorrência **exatamente 1 vencedor**;
+    inventário final consistente (26 RLS, 25 policies, 4 DEFINER, 5 helpers, anon=0).
+  - Bypass da máquina de estados via PostgREST: **FECHADO**.
+- **Próxima**: Sessão 05 — Auth de usuários (Supabase Auth: login/registro/convite,
+  perfis, sessions, JWT) + reset/replay from-scratch da cadeia 0001→0017 (hardening
+  final via dashboard, pois CLI/MCP não resetam o remoto com segurança).
 
 ## Roadmap (20 fases / 29 sessões)
 

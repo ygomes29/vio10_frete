@@ -1,16 +1,24 @@
--- 0013_rpcs.sql
--- Funções transacionais fundamentais. ADR-001 / ADR-007.
--- Histórico (Sessão 03): SECURITY INVOKER + search_path fixo.
--- >>> SUPERSEDED por 0016_rpcs_security_definer.sql (Sessão 04, Modelo B / ADR-009):
--- >>> as 4 RPCs foram recriadas como SECURITY DEFINER com checagem interna de auth.uid().
--- >>> Motivo: INVOKER exigiria grants de DML a authenticated, abrindo bypass da máquina
--- >>> de estados via PostgREST direto. Este arquivo permanece como registro histórico;
--- >>> o estado vigente vive em 0016.
+-- 0016_rpcs_security_definer.sql
+-- Reverte as RPCs user-facing para SECURITY DEFINER com checagem de auth.uid()
+-- (Modelo B, decidido na Sessão 04; ver ARCHITECTURE.md §3.1, ADR-009).
+--
+-- Por que DEFINER (e não INVOKER): com INVOKER, as mutações internas das RPCs rodariam
+-- como o caller authenticated, exigindo grants de DML a authenticated — o que abriria
+-- bypass da máquina de estados via PostgREST direto (PATCH em delivery_requests sem
+-- passar por transition_delivery). Com DEFINER, a RPC roda como owner (postgres),
+-- valida posse via auth.uid() INTERNAMENTE, e authenticated não precisa de DML direto.
+-- auth.uid() lê o JWT do caller e funciona sob DEFINER (não é o role do DB).
+--
+-- Convenção de autorização (todas as 4):
+--   auth.uid() IS NULL  -> chamada system-scoped (service_role / owner). Permitida.
+--                          (service_role é a chave secreta do backend; anon não tem EXECUTE.)
+--   auth.uid() IS NOT NULL -> chamada user-scoped. Valida posse/role do caller.
+--
+-- As RPCs de teste/runner (postgres sem JWT) têm auth.uid() = NULL -> system -> OK.
+-- Logo os testes existentes (48/48) continuam passando.
 
 -- =========================================================================
--- claim_delivery: atribuição ATÔMICA. Garantia final do invariante "uma
--- assignment ativa". Protegida por FOR UPDATE na delivery_requests + partial
--- unique index em delivery_assignments. Mesmo concorrência n8n -> um vencedor.
+-- claim_delivery: atribuição atômica. caller deve ser system (null) ou platform admin.
 -- =========================================================================
 create or replace function public.claim_delivery(
   p_delivery_request_id uuid,
@@ -21,15 +29,25 @@ create or replace function public.claim_delivery(
   p_correlation_id      uuid default gen_random_uuid()
 ) returns table(won boolean, reason text)
 language plpgsql
+security definer
 set search_path = public, pg_catalog
 as $$
 declare
-  v_status delivery_status;
+  v_caller  uuid := auth.uid();
+  v_status  delivery_status;
   v_offer_status delivery_offer_status;
   v_offer_expires timestamptz;
-  v_round_status dispatch_round_status;
+  v_round_status  dispatch_round_status;
 begin
-  -- Trava a linha da corrida (serializa claims concorrentes).
+  -- Autorização: system (null) ou platform admin (operator/admin/super_admin).
+  if v_caller is not null and not exists (
+    select 1 from public.user_platform_roles r
+    where r.user_id = v_caller and r.role in ('super_admin','admin','operator')
+  ) then
+    return query select false, 'not_authorized';
+    return;
+  end if;
+
   select dr.status into v_status
   from public.delivery_requests dr
   where dr.id = p_delivery_request_id
@@ -45,7 +63,6 @@ begin
     return;
   end if;
 
-  -- Valida offer: pertence à round, ao driver informado, e é resposta aceitável.
   select o.status, o.expires_at, r.status
     into v_offer_status, v_offer_expires, v_round_status
   from public.delivery_offers o
@@ -75,8 +92,6 @@ begin
     return;
   end if;
 
-  -- Tenta criar a assignment ativa. O partial unique index é a garantia física:
-  -- se outra concorrente já inseriu, cai em unique_violation -> 'already_assigned'.
   begin
     insert into public.delivery_assignments
       (delivery_request_id, driver_id, dispatch_round_id, delivery_offer_id, bid_id, status)
@@ -86,7 +101,6 @@ begin
     return;
   end;
 
-  -- Vencedor: atualiza estado, offer, round, event.
   update public.delivery_requests
     set status = 'assigned', assigned_at = now(), updated_at = now()
     where id = p_delivery_request_id;
@@ -94,15 +108,12 @@ begin
   update public.delivery_offers set status = 'won', responded_at = now(), updated_at = now()
     where id = p_delivery_offer_id;
 
-  -- R16 (corrigido): TODAS as offers ainda respondíveis da corrida (em qualquer rodada,
-  -- não apenas da rodada vencedora) deixam de ser respondíveis. Evita respostas tardias
-  -- inconsistentes e race conditions cross-round após a atribuição oficial.
+  -- R16: TODAS as offers ainda respondíveis da corrida inteira (qualquer rodada) viram lost.
   update public.delivery_offers set status = 'lost', updated_at = now()
     where delivery_request_id = p_delivery_request_id
       and id <> p_delivery_offer_id
       and status in ('accepted','counter_bid','pending');
 
-  -- Fecha TODAS as rodadas abertas da corrida (a vencedora e quaisquer outras abertas).
   update public.dispatch_rounds
     set status = 'closed', closed_at = now(), updated_at = now()
     where delivery_request_id = p_delivery_request_id and status = 'open';
@@ -120,11 +131,10 @@ end;
 $$;
 
 comment on function public.claim_delivery(uuid,uuid,uuid,uuid,uuid,uuid) is
-  'Atribuição atômica. Único caminho para virar vencedor oficial. Garantia: FOR UPDATE + partial unique index.';
+  'Atribuição atômica (SECURITY DEFINER). Único caminho para virar vencedor. Autorização: system (auth.uid null) ou platform admin. Garantia: FOR UPDATE + partial unique index.';
 
 -- =========================================================================
--- respond_to_offer: registra ACCEPT/COUNTER_BID/DECLINE. IDEMPOTENTE. NÃO atribui.
--- ACEITAR = lance igual a driver_offer_cents (participa da seleção, não ganha).
+-- respond_to_offer: registra ACCEPT/COUNTER_BID/DECLINE. caller = dono do driver (ou system).
 -- =========================================================================
 create or replace function public.respond_to_offer(
   p_delivery_offer_id uuid,
@@ -135,9 +145,11 @@ create or replace function public.respond_to_offer(
   p_correlation_id    uuid default gen_random_uuid()
 ) returns table(ok boolean, reason text, bid_id uuid)
 language plpgsql
+security definer
 set search_path = public, pg_catalog
 as $$
 declare
+  v_caller  uuid := auth.uid();
   v_offer         public.delivery_offers%rowtype;
   v_round_status  dispatch_round_status;
   v_del_status    delivery_status;
@@ -146,7 +158,15 @@ declare
   v_event_type    delivery_event_type;
   v_new_bid_id    uuid;
 begin
-  -- Idempotência 1: resposta já existe para (offer, driver) -> terminal, retorna.
+  -- Autorização: system (null) ou o dono do driver (drivers.user_id = auth.uid()).
+  if v_caller is not null and not exists (
+    select 1 from public.drivers d where d.id = p_driver_id and d.user_id = v_caller
+  ) then
+    return query select false, 'not_authorized', null::uuid;
+    return;
+  end if;
+
+  -- Idempotência 1: resposta já existe para (offer, driver) -> terminal.
   select * into v_existing
   from public.bids
   where delivery_offer_id = p_delivery_offer_id and driver_id = p_driver_id
@@ -157,7 +177,6 @@ begin
     return;
   end if;
 
-  -- Idempotência 2: idempotency_key já usada -> replay, retorna o existente.
   if p_idempotency_key is not null then
     select * into v_existing from public.bids where idempotency_key = p_idempotency_key;
     if found then
@@ -166,7 +185,6 @@ begin
     end if;
   end if;
 
-  -- Offer deve pertencer ao driver informado.
   select * into v_offer from public.delivery_offers
   where id = p_delivery_offer_id and driver_id = p_driver_id
   for update;
@@ -237,11 +255,11 @@ end;
 $$;
 
 comment on function public.respond_to_offer(uuid,uuid,bid_response_type,bigint,text,uuid) is
-  'Registra resposta a oferta (idempotente). NÃO atribui. ACEITAR = lance igual ao ofertado.';
+  'Registra resposta a oferta (SECURITY DEFINER, idempotente). NÃO atribui. Autorização: system ou dono do driver (auth.uid). ACEITAR = lance igual ao ofertado.';
 
 -- =========================================================================
--- transition_delivery: máquina de estados central. Ninguém seta status direto.
--- Matriz de transições permitidas. Trata reatribuição (supersede assignment anterior).
+-- transition_delivery: máquina de estados. caller = system, platform admin, driver
+-- atribuído à corrida, ou membro da org da corrida. actor é derivado de auth.uid().
 -- =========================================================================
 create or replace function public.transition_delivery(
   p_delivery_request_id uuid,
@@ -252,13 +270,53 @@ create or replace function public.transition_delivery(
   p_correlation_id     uuid default gen_random_uuid()
 ) returns table(ok boolean, reason text)
 language plpgsql
+security definer
 set search_path = public, pg_catalog
 as $$
 declare
-  v_from delivery_status;
+  v_caller  uuid := auth.uid();
+  v_from    delivery_status;
   v_allowed boolean;
   v_event_type delivery_event_type;
+  v_actor_type text := p_actor_type;
+  v_actor_id   uuid   := p_actor_id;
+  v_my_driver  uuid;
+  v_is_admin   boolean;
 begin
+  -- Autorização (quando user-scoped, auth.uid não null):
+  --   - platform admin (super_admin/admin/operator), OU
+  --   - driver com assignment ativa nesta corrida, OU
+  --   - membro da org da corrida.
+  -- Em qualquer um, o actor é derivado de auth.uid() (não confiamos nos params).
+  if v_caller is not null then
+    v_is_admin := exists (select 1 from public.user_platform_roles r
+      where r.user_id = v_caller and r.role in ('super_admin','admin','operator'));
+    if not v_is_admin then
+      -- driver dono de assignment ativa?
+      select d.id into v_my_driver from public.drivers d where d.user_id = v_caller;
+      if v_my_driver is not null and exists (
+        select 1 from public.delivery_assignments a
+        where a.delivery_request_id = p_delivery_request_id
+          and a.driver_id = v_my_driver and a.status = 'active'
+      ) then
+        v_actor_type := 'driver';
+        v_actor_id   := v_caller;
+      elsif exists (
+        select 1 from public.delivery_requests dr
+        join public.organization_memberships m on m.organization_id = dr.organization_id
+        where dr.id = p_delivery_request_id and m.user_id = v_caller
+      ) then
+        v_actor_type := 'business';
+        v_actor_id   := v_caller;
+      else
+        return query select false, 'not_authorized'; return;
+      end if;
+    else
+      v_actor_type := coalesce(nullif(p_actor_type,''), 'admin');
+      v_actor_id   := v_caller;
+    end if;
+  end if;
+
   select status into v_from from public.delivery_requests
   where id = p_delivery_request_id for update;
 
@@ -270,12 +328,12 @@ begin
     ('draft','quoted'),
     ('quoted','searching_driver'),
     ('quoted','cancelled'),
-    ('searching_driver','assigned'),       -- via claim_delivery normalmente
+    ('searching_driver','assigned'),
     ('searching_driver','cancelled'),
     ('searching_driver','expired'),
     ('searching_driver','failed'),
     ('assigned','driver_to_pickup'),
-    ('assigned','searching_driver'),        -- reatribuição
+    ('assigned','searching_driver'),
     ('assigned','failed'),
     ('assigned','cancelled'),
     ('driver_to_pickup','at_pickup'),
@@ -293,7 +351,6 @@ begin
     return query select false, 'invalid_transition'; return;
   end if;
 
-  -- Reatribuição: encerra assignment ativa anterior antes de voltar a searching.
   if v_from in ('assigned','driver_to_pickup','in_transit') and p_to_status = 'searching_driver' then
     update public.delivery_assignments
       set status = 'superseded', ended_at = now(), ended_reason = 'reassigned', updated_at = now()
@@ -302,7 +359,6 @@ begin
       where id = p_delivery_request_id;
   end if;
 
-  -- Mapeia evento.
   v_event_type := case p_to_status
     when 'quoted' then 'quote_created'::delivery_event_type
     when 'searching_driver' then 'dispatch_started'::delivery_event_type
@@ -334,7 +390,7 @@ begin
 
   insert into public.delivery_events
     (delivery_request_id, event_type, actor_type, actor_id, from_status, to_status, metadata, correlation_id)
-  values (p_delivery_request_id, v_event_type, p_actor_type, p_actor_id, v_from, p_to_status,
+  values (p_delivery_request_id, v_event_type, v_actor_type, v_actor_id, v_from, p_to_status,
     coalesce(p_metadata, '{}'::jsonb), p_correlation_id);
 
   return query select true, 'transitioned';
@@ -342,10 +398,10 @@ end;
 $$;
 
 comment on function public.transition_delivery(uuid,delivery_status,text,uuid,jsonb,uuid) is
-  'Máquina de estados central. Matriz de transições. Supersede assignment anterior em reatribuição.';
+  'Máquina de estados central (SECURITY DEFINER). Matriz de transições. Autorização: system, platform admin, driver atribuído ou membro da org. Actor derivado de auth.uid().';
 
 -- =========================================================================
--- set_driver_availability: atualiza estado atual + log (atômico).
+-- set_driver_availability: caller = dono do driver (ou system).
 -- =========================================================================
 create or replace function public.set_driver_availability(
   p_driver_id  uuid,
@@ -353,9 +409,19 @@ create or replace function public.set_driver_availability(
   p_reason     text default null
 ) returns void
 language plpgsql
+security definer
 set search_path = public, pg_catalog
 as $$
+declare
+  v_caller uuid := auth.uid();
 begin
+  -- Autorização: system (null) ou dono do driver.
+  if v_caller is not null and not exists (
+    select 1 from public.drivers d where d.id = p_driver_id and d.user_id = v_caller
+  ) then
+    raise exception 'not_authorized';
+  end if;
+
   update public.drivers
     set current_availability_status = p_status, updated_at = now()
     where id = p_driver_id;
@@ -365,4 +431,16 @@ end;
 $$;
 
 comment on function public.set_driver_availability(uuid,driver_availability_status,text) is
-  'Atualiza estado atual (drivers) + append em log (driver_availability) numa transação.';
+  'Atualiza disponibilidade (SECURITY DEFINER). Autorização: system ou dono do driver (auth.uid). Estado atual + append no log numa transação.';
+
+-- =========================================================================
+-- Revoga grants antigos de PUBLIC/extra e reafirma: só service_role + authenticated
+-- (conforme 0015) têm EXECUTE. As funções agora são DEFINER — qualquer role com EXECUTE
+-- pode invocar (a autorização é interna), então os grants do 0015 continuam válidos.
+-- =========================================================================
+revoke all on all functions in schema public from public;
+-- Reaplica EXECUTE conforme 0015 (idempotente): service_role nas 4, authenticated nas 3 user-facing.
+grant execute on function public.claim_delivery(uuid,uuid,uuid,uuid,uuid,uuid)        to service_role;
+grant execute on function public.respond_to_offer(uuid,uuid,bid_response_type,bigint,text,uuid) to service_role, authenticated;
+grant execute on function public.transition_delivery(uuid,delivery_status,text,uuid,jsonb,uuid) to service_role, authenticated;
+grant execute on function public.set_driver_availability(uuid,driver_availability_status,text) to service_role, authenticated;

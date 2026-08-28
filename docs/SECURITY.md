@@ -53,11 +53,21 @@ Regras:
 
 1. **`service_role` nunca vaza** para n8n, DataCrazy, IA ou qualquer integrador externo.
    Eles chamam endpoints do backend; o backend decide o contexto por operação.
-2. **RPCs são `SECURITY INVOKER`** (não `DEFINER`) — herdam RLS de quem chama. Chamada
-   user-scoped → RLS aplica; chamada system-scoped → bypass. Sem atalho `DEFINER`.
-3. **service_role tem grants default-deny** desde a Sessão 03.5 (0014): nenhum role
-   não-owner tem privilégios em `public` até grants explícitos (Sessão 04). O backend
-   system-scoped recebe grants **por função** (least-privilege), não "tudo".
+2. **RPCs user-facing são `SECURITY DEFINER` com checagem interna de `auth.uid()`**
+   (Modelo B, Sessão 04 — reverte o INVOKER da Sessão 03; ver ADR-009 e
+   `0016_rpcs_security_definer.sql`). A RPC roda como owner (bypassa RLS) e valida
+   posse do caller internamente: `auth.uid() IS NULL` → system-scoped, permitido;
+   `auth.uid() IS NOT NULL` → user-scoped, valida `drivers.user_id`, membership da org
+   ou `user_platform_roles`. **Motivo:** com INVOKER + grants de DML a `authenticated`,
+   um motorista logado poderia `PATCH delivery_requests.status` via PostgREST direto,
+   furando a máquina de estados. Com DEFINER + **sem** DML de domínio a `authenticated`,
+   a única mutação user-facing é a RPC, que faz a checagem. `auth.uid()` funciona sob
+   DEFINER (lê o JWT, não o role do DB).
+3. **Grants least-privilege** desde a Sessão 04 (`0014` default-deny total + `0015`
+   least-privilege): `service_role` DML em tudo + EXECUTE nas 4 RPCs; `authenticated`
+   SELECT em 20 tabelas (sob RLS `0017`) + EXECUTE nas 3 RPCs user-facing +
+   INSERT/UPDATE só em `driver_locations`; `anon` nada. Mutação de domínio user-facing
+   nunca por DML direto — só via RPC.
 4. **Promoção proibida**: uma ação iniciada por usuário roda user-scoped. O backend não
    a "promove" a system-scoped para contornar RLS. Se o usuário não teria direito via
    RLS, o backend também não concede.

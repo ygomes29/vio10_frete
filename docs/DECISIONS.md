@@ -19,6 +19,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-006 | bidding round antes da atribuição (ACEITAR ≠ GANHAR) | Aprovado |
 | ADR-007 | Atribuição atomicamente protegida pelo banco | Aprovado |
 | ADR-008 | Valores financeiros em centavos inteiros | Aprovado |
+| ADR-009 | Matriz RBAC (papel × recurso × ação) — escopo MVP | Aprovado (Sessão 04) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -52,8 +53,9 @@ Aprovadas na Sessão 02 (2026-08-27).
   externo vs retry de operação); ver `docs/SECURITY.md`.
 - **`service_role` user-scoped vs system-scoped**: operações de usuário rodam
   user-scoped (`authenticated`, RLS aplica); operações do sistema rodam system-scoped
-  (`service_role`, bypass). `service_role` nunca vaza para integradores externos;
-  RPCs são `SECURITY INVOKER`. Ver `ARCHITECTURE.md` §3.1.
+  (`service_role`, bypass). `service_role` nunca vaza para integradores externos. Ver
+  `ARCHITECTURE.md` §3.1. (Sessão 04 reverteu "RPCs SECURITY INVOKER" para **Modelo B**:
+  RPCs user-facing `SECURITY DEFINER` + checagem de `auth.uid()` — `0016`, ADR-009.)
 - **pgTAP server-side sem Docker**: runner próprio (temp table `_tap` + `num_failed()`
   + `begin/rollback` clean-slate) para executar testes via Management API quando Docker
   está ausente.
