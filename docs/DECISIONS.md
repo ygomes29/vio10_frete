@@ -24,6 +24,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-011 | Criação da corrida + gestão de entidades (empresas/veículos/entregadores) | Aprovado (Sessão 06) |
 | ADR-012 | Pricing engine determinístico (cotação, `draft → quoted`) | Aprovado (Sessão 07) |
 | ADR-013 | Dispatch engine (busca de candidatos + raio progressivo, `quoted → searching_driver`) | Aprovado (Sessão 08) |
+| ADR-014 | Bid engine (scoring + seleção + `claim_delivery` atômico, `searching_driver → assigned`) | Aprovado (Sessão 09) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -126,6 +127,56 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 09 — Bid engine (scoring + seleção + `claim_delivery` atômico, ADR-014)
+
+- **1 RPC system-only `select_winner_and_claim`** (D1, terceiro system-only após
+  `create_quote`/`open_dispatch_round`): fecha a rodada, coleta candidatos válidos,
+  pontua in-DB, escolhe vencedor determinístico, chama `claim_delivery` internamente
+  (atômico). Sem vencedor → fecha a rodada + `no_candidates` (orquestrador abre a próxima
+  rodada de raio maior). `BACKEND.md` §4 já previa `select_winner_and_claim`. Espelha o
+  padrão system-only de `create_quote`/`open_dispatch_round`.
+- **Scoring min-max + pesos de param** (D4): `bid_amount_cents` + distância PostGIS
+  (`ST_Distance` `driver_locations.position` vs `pickup_point`); **ETA peso 0** até o
+  RoutingProvider (Sessão 20) — distância como proxy operacional. Normalização min-max
+  (`nullif` evita divisão por zero; fator constante → não diferencia → tie-break decide).
+  `score = p_weight_price*(1-norm_bid) + p_weight_distance*(1-norm_dist)` (`numeric`
+  adimensional, **não** dinheiro; dinheiro permanece `bigint` em `bid_amount_cents`).
+- **Tie-break determinístico** (definido no ADR, não ditado por ADR-006): `score desc,
+  dist_m asc, responded_at asc, driver_id asc`. Distância primeiro, depois rapidez de
+  resposta, depois `driver_id` (estável entre runs). `now()` é constante numa transação →
+  em testes single-tx o tie-break cai para `driver_id` asc; a ordem `responded_at` é
+  exercitada em concorrência real na Sessão 10 (GATE).
+- **Re-validação de eligibility no close** (D3): candidatos = offers respondidas
+  (`accepted`/`counter_bid`) com driver ainda elegível (active+available+veículo
+  compatível+sem assignment ativa+localização fresca+`ST_DWithin` no raio da própria
+  rodada+offer não expirada). O driver que ACEITOU mas depois foi atribuído a outra
+  corrida (race) é excluído — sua offer vira `lost` (R16) ou `expired` (no_candidates).
+  Reusa a eligibility do `open_dispatch_round` (0023:201-217) verbatim, a partir das
+  offers respondidas.
+- **Sem coluna de winner** (D6): o vencedor vive em `delivery_assignments` (linha
+  `active`) + `delivery_offers.status='won'` + `delivery_events` (`winner_selected` com
+  scores de todos os candidatos no `metadata` — rastro **explicável**). **Sem `winner_*`
+  em `dispatch_rounds`**. **Nenhuma tabela/coluna nova.**
+- **Sem early-close arbitrária no MVP** (D5, ADR-006): o MVP espera o timeout da janela;
+  o orquestrador chama `select_winner_and_claim` no close. Early close futuro só por regra
+  determinística explícita (ex.: `candidate_score >= fast_accept_threshold`), nunca
+  "primeiro que aceitar ganha".
+- **System-only / trust boundary** (D1): pesos de scoring vêm do backend (config do
+  orquestrador), não do business — um business passando pesos forjaria o vencedor. Grants:
+  `revoke public` + `execute` só a `service_role` (`authenticated` sem EXECUTE — defesa em
+  profundidade); `anon`: nada. Idempotência por estado: rodada já `closed` →
+  `round_not_open`.
+- **Raio progressivo** (D2): orquestrador chama `open_dispatch_round` (raio maior) +
+  `select_winner_and_claim` (fecha + tenta atribuir) repetidamente. Sem vencedor →
+  próxima rodada; com vencedor → `assigned`, fim do dispatch.
+- **GATE (Sessão 10)**: atomicidade de `claim_delivery` testada funcionalmente (exatamente
+  1 assignment ativo, `already_assigned` no pós-race); o harness de **concorrência real**
+  (dois `select_winner_and_claim`/`claim_delivery` paralelos via `dblink`/advisory lock) é
+  o gate formal de produção (ADR-007).
+- **Sem novos grants de DML a `authenticated`; sem tabela nova** (D8): único grant novo
+  = `execute on select_winner_and_claim to service_role`. `dispatch_rounds`/
+  `delivery_offers`/`bids` já têm RLS SELECT (0017) + `service_role` DML (0015).
 
 ### Sessão 08 — Dispatch engine (busca de candidatos + raio progressivo, ADR-013)
 

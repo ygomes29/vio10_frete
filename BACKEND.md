@@ -66,8 +66,11 @@ valida). `authenticated` não recebe DML de domínio — só EXECUTE nas RPCs + 
 - `set_driver_availability(p_driver_id, p_status, p_reason)` — atualiza
   `drivers.current_availability_status` + append em `driver_availability` (log).
 
-Ainda não implementado (Sessão 09/10): `select_winner_and_claim(p_round_id)` —
-pontua/ordena candidatos e chama `claim_delivery`. Até lá, a seleção não existe.
+Ainda não implementado (Sessão 10): harness de **concorrência real** de
+`claim_delivery`/`select_winner_and_claim` (dois claims paralelos via `dblink`/advisory
+lock) — gate formal de produção (ADR-007). A seleção pontua/ordena candidatos e chama
+`claim_delivery` via `select_winner_and_claim` (§4.5, Sessão 09); a atomicidade
+funcional já é testada.
 
 ### 4.1 RPCs de identidade / convite (Sessão 05, ADR-010)
 
@@ -257,6 +260,59 @@ to service_role`. `dispatch_started_at`/`dispatch_started` são setados por
 `transition_delivery` (0016, já na matriz). Busca por PostGIS (`ST_DWithin`/`ST_Distance`)
 é **filtro de candidatos** (proximidade operacional) — distinto de pricing, onde haversine
 é proibido para cobrança.
+
+### 4.5 RPC de bid engine (Sessão 09, ADR-014)
+
+Implementada em `supabase/migrations/0024_bid_engine.sql` (1 RPC). **Nenhuma
+tabela/coluna nova** — tudo já existe em 0005/0009/0010/0016. Modelo B: `SECURITY
+DEFINER`; `authenticated` **sem EXECUTE** (defesa em profundidade); `anon`: nada.
+
+- **`select_winner_and_claim(p_dispatch_round_id uuid, p_weight_price numeric default
+  1.0, p_weight_distance numeric default 1.0, p_max_location_age_seconds integer default
+  300, p_correlation_id uuid default gen_random_uuid())`** → `table(ok boolean, reason
+  text, winner_driver_id uuid, winner_offer_id uuid, winner_bid_id uuid)`.
+  `SECURITY DEFINER`, `set search_path = public, extensions, pg_catalog` (PostGIS
+  `ST_Distance`/`ST_DWithin`). **System-only** (D1, terceiro após `create_quote`/
+  `open_dispatch_round`): `auth.uid() IS NOT NULL` → `(false,'not_authorized',null,null,
+  null)`. Grants: `revoke all from public` + `grant execute to service_role` **somente**
+  (`authenticated` sem EXECUTE; `anon`: nada). **Trust boundary:** pesos de scoring vêm do
+  backend (config do orquestrador), não do business — um business passando pesos forjaria
+  o vencedor.
+- **Validações**: params (D2) — `p_weight_price >= 0`, `p_weight_distance >= 0`, **não
+  ambos 0**, `p_max_location_age_seconds > 0` (senão `invalid_param`); rodada existe e
+  `status='open'` (senão `round_not_open`/`not_found`, `FOR UPDATE`); delivery
+  `status='searching_driver'` (senão `wrong_state`, `FOR UPDATE`).
+- **Candidatos válidos** (D3): offers respondidas (`accepted`/`counter_bid`) + join `bids`
+  (`bid_amount_cents`) + re-valida eligibility do `open_dispatch_round` (active+available
+  +veículo compatível+sem assignment ativa+localização fresca+`ST_DWithin` no raio da
+  própria rodada) + offer não expirada. Declined excluída.
+- **Scoring** (D4, min-max por window function): `norm_bid = (bid-min_bid)/nullif(max_bid-
+  min_bid,0)`, `norm_dist` análogo; `score = p_weight_price*(1-norm_bid) +
+  p_weight_distance*(1-norm_dist)` (`numeric` adimensional, maior = melhor). **Tie-break**:
+  `score desc, dist_m asc, responded_at asc, driver_id asc`.
+- **Sem vencedor** (0): fecha rodada manualmente + expira offers pending + emite
+  `round_closed` (reason=`no_candidates`) + retorna `(true,'no_candidates',null,null,
+  null)`. Delivery permanece `searching_driver`; rodada `closed` libera o guard
+  `round_already_open` → orquestrador abre a próxima (raio maior).
+- **Com vencedor**: emite `winner_selected` (scores de todos os candidatos no `metadata`
+  — auditoria/explicabilidade) + chama `claim_delivery(v_delivery_id, v_winner_driver,
+  p_dispatch_round_id, v_winner_offer, v_winner_bid, p_correlation_id)` (atomic; alias
+  `as t` + `t.won, t.reason` — lição da Sessão 07). Claim `ok` → `(true,'won',...)`.
+  Claim `not ok` por race (`already_assigned`/`not_searching_driver`/
+  `delivery_not_found`) → fecha nossa rodada como superseded + `round_closed`
+  (reason=`superseded_by_concurrent_claim`) + `(false, reason, null,null,null)`.
+- **Ator** (D7): system → `actor_type='system'`, `actor_id=null` (system-only). Nunca de
+  param. `winner_selected`/`round_closed` emitidos com ator system; `driver_assigned`
+  emitido por `claim_delivery` (seu próprio ator system).
+- **Sem `winner_*` em `dispatch_rounds`** (D6): vencedor recuperável por
+  `delivery_assignments` (active) + `delivery_offers.status='won'` + `delivery_events`.
+
+**Sem novos grants de DML a `authenticated`; sem tabela/coluna nova** (D8): único grant
+novo = `execute on select_winner_and_claim to service_role`. `dispatch_rounds`/
+`delivery_offers`/`bids` já têm RLS SELECT (0017) + `service_role` DML (0015).
+`claim_delivery`/`transition_delivery` já concedidos a `service_role` (0016). **GATE
+(Sessão 10)**: atomicidade funcional testada (exatamente 1 assignment ativo,
+`already_assigned` no pós-race); harness de concorrência real é o gate formal de produção.
 
 ## 5. Idempotência
 

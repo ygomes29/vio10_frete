@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-014) |
 
 ## Estado atual
 
@@ -179,7 +179,28 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   `as t` + PostGIS em `extensions` não `public`) aplicadas proativamente — nenhum bug em
   runtime. pgTAP `finish()` neste dev emite via RAISE (0 rows); `num_failed()=0` é a
   autoridade.
-- **Próxima**: Sessão 09 — bid engine (scoring + seleção + `claim_delivery` atômico;
-  `searching_driver → assigned`) — **GATE**.
+- **Sessão 09 (concluída)**: Bid engine (scoring + seleção + `claim_delivery` atômico,
+  `searching_driver → assigned`) — **PASS**. 24 migrations (**0024**
+  `select_winner_and_claim` DEFINER system-only; **nenhuma tabela/coluna nova** — tudo já
+  existe em 0005/0009/0010/0016). ADR-014 (D1 `select_winner_and_claim` **system-only** —
+  terceiro system-only, trust boundary de pesos de scoring; D2 fluxo validate→coletar→
+  0: fechar manual | ≥1: pontuar→claim; D3 candidatos válidos = responded + ainda-eligible,
+  re-valida eligibility no close; D4 scoring min-max de `bid_amount_cents` + `ST_Distance`
+  PostGIS, pesos de param, tie-break determinístico `score desc, dist_m asc, responded_at
+  asc, driver_id asc`; D5 seleção≠confirmação — `claim_delivery` confirma; D6 auditoria via
+  `delivery_events` — scores no metadata, sem `winner_*` em `dispatch_rounds`; D7 ator
+  system; D8 sem novos grants de DML a `authenticated`, sem tabela/coluna nova). ACEITAR ≠
+  GANHAR garantido no close + claim atômico. Raio progressivo: sem vencedor →
+  `no_candidates` → orquestrador abre a próxima rodada. Grants: `revoke public` +
+  `execute` só a `service_role` (`authenticated` sem EXECUTE — defesa em profundidade).
+  Hardening: reset via SQL + replay 0001→0024 limpo (24/24); invariants 13/13, rpcs 48/48,
+  authz 21/21, auth_lifecycle 34/34, creation 37/37, pricing 62/62, dispatch 65/65, bid
+  61/61 PASS. Bugs de teste corrigidos (poluição cross-scenario via pickup compartilhado em
+  single-tx → isolamento por longitude; asserção T2 invertida). Nenhum bug de RPC em
+  runtime (lições Sessão 07/08 — ambiguidade `as t` e PostGIS em `extensions` — aplicadas
+  proativamente). `searching_driver → assigned` só via `select_winner_and_claim` →
+  `claim_delivery`.
+- **Próxima**: Sessão 10 — atribuição atômica em **concorrência real** (harness via
+  `dblink`/paralelismo, greenfield, ADR-007) — **GATE de produção**.
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

@@ -72,20 +72,24 @@ Regras:
    a "promove" a system-scoped para contornar RLS. Se o usuário não teria direito via
    RLS, o backend também não concede.
 5. **RPCs system-only** (`create_quote` Sessão 07 ADR-012 D1; `open_dispatch_round`
-   Sessão 08 ADR-013 D2): RPCs que **não aceitam caller autenticado de forma alguma** —
-   `auth.uid() IS NOT NULL` → `not_authorized`. `revoke all from public` + `grant execute
-   to service_role` **somente**: `authenticated` **nem EXECUTE** recebe (defesa em
-   profundidade — bloqueio no nível de privilégio antes da checagem interna de
-   `auth.uid()`); `anon`: nada. **Trust boundary dos insumos de pricing** (`create_quote`):
-   distância/duração são do provider de rota (plataforma, Sessão 20), não do business —
-   um business passando `p_distance_meters` forjaria distância pequena → preço baixo.
-   **Trust boundary dos insumos de dispatch** (`open_dispatch_round`): raio/max_candidates/
-   driver_offer/janela são do orquestrador (backend), não do business — um business
-   passando `p_search_radius_m`/`p_driver_offer_cents` forjaria a busca/oferta. O dashboard
-   "solicitar cotação"/"abrir despacho" chama um Route Handler do backend, que chama a RPC
+   Sessão 08 ADR-013 D2; `select_winner_and_claim` Sessão 09 ADR-014 D1): RPCs que **não
+   aceitam caller autenticado de forma alguma** — `auth.uid() IS NOT NULL` →
+   `not_authorized`. `revoke all from public` + `grant execute to service_role`
+   **somente**: `authenticated` **nem EXECUTE** recebe (defesa em profundidade — bloqueio
+   no nível de privilégio antes da checagem interna de `auth.uid()`); `anon`: nada.
+   **Trust boundary dos insumos de pricing** (`create_quote`): distância/duração são do
+   provider de rota (plataforma, Sessão 20), não do business — um business passando
+   `p_distance_meters` forjaria distância pequena → preço baixo. **Trust boundary dos
+   insumos de dispatch** (`open_dispatch_round`): raio/max_candidates/driver_offer/janela
+   são do orquestrador (backend), não do business — um business passando
+   `p_search_radius_m`/`p_driver_offer_cents` forjaria a busca/oferta. **Trust boundary dos
+   pesos de scoring** (`select_winner_and_claim`): os pesos de scoring vêm do backend
+   (config do orquestrador), não do business — um business passando `p_weight_price`/
+   `p_weight_distance` forjaria o vencedor. O dashboard "solicitar cotação"/"abrir
+   despacho"/"fechar rodada" chama um Route Handler do backend, que chama a RPC
    system-scoped (Sessão 18). Distinto de `create_delivery_request`/`confirm_quote`
-   (aceitam membro de org): os endereços da corrida são do business; a distância e os
-   insumos de dispatch são da plataforma.
+   (aceitam membro de org): os endereços da corrida são do business; a distância, os
+   insumos de dispatch e os pesos de scoring são da plataforma.
 
 ### Auth de usuários — identidade, convite e atribuição de papel (Sessão 05, ADR-010)
 
@@ -145,6 +149,7 @@ tabelas; a única mutação user-facing é a RPC, que checa `auth.uid()` interna
 | `create_quote` | **negado** (system-only — `auth.uid() IS NOT NULL` → `not_authorized`; `authenticated` sem EXECUTE) | **permitido** (backend cota `draft→quoted`; insumos de rota da plataforma) |
 | `confirm_quote` | membro da org **ou** `is_platform_admin()` (admin/operator) | **permitido** (backend confirma `quoted→searching_driver`; valida quote pendente não expirada) |
 | `open_dispatch_round` | **negado** (system-only — `auth.uid() IS NOT NULL` → `not_authorized`; `authenticated` sem EXECUTE) | **permitido** (backend abre rodada de dispatch; insumos de raio/oferta do orquestrador) |
+| `select_winner_and_claim` | **negado** (system-only — `auth.uid() IS NOT NULL` → `not_authorized`; `authenticated` sem EXECUTE) | **permitido** (backend fecha rodada, pontua, escolhe vencedor, chama `claim_delivery` atômico; pesos de scoring do orquestrador) |
 
 Notas:
 - **`create_organization` = super/admin apenas**: criar tenant é ato de plataforma. O
@@ -197,6 +202,34 @@ RPC `SECURITY DEFINER` (Modelo B); `authenticated` **sem DML** em `dispatch_roun
 - **Sem novos grants de DML a `authenticated`; sem tabela nova** (D8): `dispatch_rounds`/
   `delivery_offers` já têm RLS SELECT (0017) + `service_role` DML (0015). Único grant
   system-only novo: `execute on open_dispatch_round to service_role`.
+
+### Matriz de autoridade de bid (Sessão 09, ADR-014)
+
+Estende a matriz para o **motor de lances / seleção do vencedor**. `select_winner_and_claim`
+é system-only (terceiro após `create_quote`/`open_dispatch_round`) — o orquestrador/backend
+fecha a rodada, pontua e atribui; os pesos de scoring não vêm do business. Via RPC
+`SECURITY DEFINER` (Modelo B); `authenticated` **sem EXECUTE** (defesa em profundidade);
+`anon`: nada.
+
+- **`select_winner_and_claim` system-only**: `authenticated` **nem EXECUTE** recebe.
+  **Trust boundary de scoring:** `p_weight_price`/`p_weight_distance` são insumos do
+  orquestrador (backend), não do business — um business passando os pesos forjaria o
+  vencedor (peso preço alto favorece lance alto; peso distância alta favorece o longe).
+  O backend lê config própria (`scoring_config` table adiada). Re-valida eligibility do
+  driver no close (active+available+veículo compatível+sem assignment ativa+localização
+  fresca+`ST_DWithin` no raio da própria rodada+offer não expirada); o driver que ACEITOU
+  mas foi atribuído a outra corrida (race) é excluído — sua offer vira `lost` (R16) ou
+  `expired` (no_candidates). Sem vencedor → fecha rodada + `no_candidates` (orquestrador
+  abre a próxima de raio maior). Com vencedor → `winner_selected` (scores no `metadata`)
+  + `claim_delivery` atômico (atribui, fecha rodada, R16 perde demais, `driver_assigned`).
+  Idempotência por estado: rodada já `closed` → `round_not_open`.
+- **Sem `winner_*` em `dispatch_rounds`**: o vencedor vive em `delivery_assignments`
+  (active) + `delivery_offers.status='won'` + `delivery_events`. **Nenhuma
+  tabela/coluna nova.**
+- **Sem novos grants de DML a `authenticated`; sem tabela nova** (D8): único grant novo =
+  `execute on select_winner_and_claim to service_role`. `dispatch_rounds`/`delivery_offers`/
+  `bids` já têm RLS SELECT (0017) + `service_role` DML (0015); `claim_delivery`/
+  `transition_delivery` já concedidos a `service_role` (0016).
 
 ## Idempotência
 

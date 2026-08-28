@@ -56,9 +56,15 @@ draft → quoted → searching_driver → assigned → driver_to_pickup
 > `confirm_quote` (user-scoped: business/operator/admin/membro da org ou system, ADR-013
 > D1) — confirma a cotação pendente (`delivery_quotes.status='pending'` → `confirmed`,
 > `confirmed_at` setado), com atomicidade transition-first (sem quote confirmed órfã).
-> `searching_driver → assigned` continua via `claim_delivery` (0013), mas a **seleção do
-> vencedor** (fechar rodada, scoring, escolher) é a **Sessão 09-10** (GATE) — a Sessão 08
-> só abre rodadas (`open_dispatch_round`, system-only) e cria offers.
+> A Sessão 08 só abre rodadas (`open_dispatch_round`, system-only) e cria offers.
+> **Implementação (Sessão 09):** `searching_driver → assigned` é via
+> `select_winner_and_claim` (system-only, ADR-014) → `claim_delivery` (0016) atômico. A RPC
+> fecha a rodada, pontua candidatos válidos (min-max de `bid_amount_cents` + distância
+> PostGIS, pesos de param, tie-break determinístico), escolhe o vencedor e chama
+> `claim_delivery` internamente (atribui, fecha a rodada, R16 perde demais offers, emite
+> `driver_assigned`). Sem vencedor → fecha a rodada + `no_candidates` (orquestrador abre a
+> próxima rodada de raio maior). **GATE de produção (Sessão 10)**: a atomicidade em
+> concorrência real é validada formalmente via harness paralelo (ADR-007).
 2. Cada transição importante valida:
    - estado atual permite o destino;
    - ator é autorizado para a transição;
@@ -73,7 +79,7 @@ draft → quoted → searching_driver → assigned → driver_to_pickup
 |---|---|
 | draft → quoted | sistema (pricing, `create_quote` — ADR-012) |
 | quoted → searching_driver | business_owner/user, operator, admin, sistema (`confirm_quote` — ADR-013; confirma a cotação pendente) |
-| searching_driver → assigned | sistema (claim atômico após seleção — Sessão 09-10) |
+| searching_driver → assigned | sistema (`select_winner_and_claim` → `claim_delivery` atômico — Sessão 09/10) |
 | searching_driver → expired | sistema (rodadas esgotadas) |
 | → cancelled (pré-atribuição) | business_owner/user, operator, admin |
 | assigned → driver_to_pickup | driver (ou sistema via confirmação) |

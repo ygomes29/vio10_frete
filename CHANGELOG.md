@@ -312,6 +312,89 @@ Formato: sessão + data + escopo.
   chamar `create_vehicle(v_drv, …)` (mesmo driver, placa duplicada) em vez de `v_drv2`
   (que falhava authz antes do conflito de placa). 37/37 após o ajuste.
 
+## [Sessão 09] — 2026-08-28 — Bid engine (scoring + seleção + `claim_delivery` atômico)
+
+### Adicionado
+- **ADR-014** — bid engine. D1 `select_winner_and_claim` system-only (terceiro system-only
+  após `create_quote`/`open_dispatch_round`; trust boundary de pesos de scoring); D2 fluxo
+  (validate → coletar → 0: fechar manual | ≥1: pontuar → claim); D3 candidatos válidos =
+  responded + ainda-eligible (re-valida eligibility no close); D4 scoring min-max + pesos
+  de param + tie-break determinístico; D5 seleção ≠ confirmação (`claim_delivery` confirma);
+  D6 auditoria via `delivery_events` (scores no metadata, sem coluna de winner); D7 ator
+  via `auth.uid` (system); D8 sem novos grants de DML a `authenticated`, sem tabela/coluna
+  nova.
+- **Migration 0024** — 1 RPC `SECURITY DEFINER` system-only: `select_winner_and_claim`
+  (`search_path = public, extensions, pg_catalog` — PostGIS `ST_Distance`/`ST_DWithin`).
+  **Nenhuma tabela/coluna nova** — tudo já existe em 0005/0009/0010/0016. Grants: `revoke
+  public` + `execute` só a `service_role` (`authenticated` sem EXECUTE — defesa em
+  profundidade); `anon`: nada. Fecha a rodada, pontua candidatos válidos (min-max de
+  `bid_amount_cents` + `ST_Distance`, pesos de param, tie-break `score desc, dist_m asc,
+  responded_at asc, driver_id asc`), escolhe vencedor, chama `claim_delivery` atomicamente
+  (alias `as t` + `t.won, t.reason` — lição da Sessão 07). Sem vencedor → fecha rodada +
+  expira pending + `round_closed` (no_candidates) + retorna `no_candidates`. Com vencedor
+  → `winner_selected` (scores no metadata) + `claim_delivery` (atribui, fecha rodada,
+  R16, `driver_assigned`). Claim race → fecha como superseded + retorna o reason.
+- **`supabase/tests/test_vio10_bid.sql`** — 61 asserções (begin/rollback + SELECT
+  consolidado). T1 basic win (todos accept, bids iguais → mais próximo); T2 no_candidates
+  (decline + pending→expired); T3 counter_bid (distâncias iguais → menor bid); T4
+  weight_price=0 (mais próximo independente do bid); T5 weight sensitivity (1/1 → d2,
+  2/1 → d3); T6 eligibility re-check (assignment race → próximo); T7 re-check (offline);
+  T8 expired offer excluded; T9 round_already_closed → `round_not_open`; T10 wrong_state
+  (cancelled); T11 system-only (`not_authorized` vs won); T12 invalid_param (pesos 0,
+  negativo, max_age<=0); T13 tie-break (score idêntico → driver_id asc); T14 fator
+  constante (nullif); T15 raio progressivo (round1 raio 2000 → 1 candidato no_candidates
+  → round2 raio 6000 → 2 candidatos, round_number=2, win); T16 not_found. Geometria
+  isolada por cenário (cada teste pickup em longitude distinta B=N.0, drivers em B+off;
+  bases ~111km aparte → sem poluição cross-scenario via `ST_DWithin`).
+
+### Decisões
+- **1 RPC system-only `select_winner_and_claim`**: fecha a rodada, pontua in-DB, escolhe
+  vencedor, chama `claim_delivery` internamente. Sem vencedor → fecha + `no_candidates`.
+  Espelha o padrão system-only de `create_quote`/`open_dispatch_round`. `BACKEND.md` §4 já
+  previa `select_winner_and_claim`.
+- **Scoring: `bid_amount_cents` + distância PostGIS, ETA peso 0** até o RoutingProvider
+  (Sessão 20); distância como proxy operacional. Pesos como params do caller (backend),
+  sem `scoring_config` table no MVP (adiada).
+- **Tie-break determinístico** (definido no ADR, não ditado por ADR-006): `score desc,
+  dist_m asc, responded_at asc, driver_id asc`. `now()` constante numa transação → em
+  testes single-tx o tie-break cai para `driver_id` asc; a ordem `responded_at` é
+  exercitada em concorrência real na Sessão 10 (GATE).
+- **Sem `winner_*` em `dispatch_rounds`**: vencedor em `delivery_assignments` (active) +
+  `delivery_offers.status='won'` + `delivery_events`. **Nenhuma tabela/coluna nova.**
+- **Sem early-close arbitrária no MVP** (ADR-006): MVP espera o timeout da janela; early
+  close futuro só por regra determinística explícita (`candidate_score >=
+  fast_accept_threshold`), nunca "primeiro que aceitar ganha".
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- **Reset from-scratch** via SQL + **replay 0001→0024 em ordem** — 24/24 limpo (sem
+  MIGFAIL).
+- Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `select_winner_and_claim` `SECURITY
+  DEFINER` system-only (execute só service_role — `swac_exec_grants=1`, authenticated sem
+  EXECUTE), `anon`=0 grants em `public`.
+- `test_vio10_invariants.sql` → **13/13 PASS**; `test_vio10_rpcs.sql` → **48/48 PASS**;
+  `test_vio10_authz.sql` → **21/21 PASS**; `test_vio10_auth_lifecycle.sql` → **34/34
+  PASS**; `test_vio10_creation.sql` → **37/37 PASS**; `test_vio10_pricing.sql` → **62/62
+  PASS**; `test_vio10_dispatch.sql` → **65/65 PASS**; `test_vio10_bid.sql` → **61/61
+  PASS** — todas reais (não simulado).
+- Veredito **GO → Sessão 10** (atribuição atômica em concorrência real — GATE de produção).
+
+### Corrigido (durante a validação real)
+- **Poluição de drivers cross-scenario (5 falhas)**: a 1ª versão do `test_vio10_bid.sql`
+  usava pickup `(0,0)` para todos os cenários + drivers em lat=0 — no single-tx
+  (`begin;…rollback;`), drivers de testes anteriores (ainda active/available/fresh, sem
+  assignment) vazavam para `open_dispatch_round` de testes posteriores (todos a ≤5000m do
+  pickup compartilhado); com `max_candidates=10`, polluters mais próximos crowding-out os
+  drivers-alvo (T5a/T5b vencedor errado; T15 round1/round2 count=10 em vez de 1/2). Corrigido
+  dando a cada cenário uma longitude de pickup distinta (`B=N.0`, N=1..15) e colocando os
+  drivers do teste em `B+off` — bases ~111km aparte isolam via `ST_DWithin`. Mais uma
+  asserção invertida (`T2_no_winner` expected `'f'`→`'t'`: no_candidates retorna
+  `winner_driver_id` null, e a asserção `winner_driver_id is null → 't'` tinha expected
+  errado). 61/61 após o ajuste.
+- **Nenhum bug na RPC em runtime**: as lições da Sessão 07 (ambiguidade `as t` ao chamar
+  `claim_delivery`) e da Sessão 08 (PostGIS em `extensions`, não-qualificado) foram
+  aplicadas proativamente em 0024 — replay 24/24 + suíte bid 61/61 na 2ª execução (apenas
+  bugs de teste, não de RPC).
+
 ## [Sessão 08] — 2026-08-28 — Dispatch engine (busca de candidatos + raio progressivo)
 
 ### Adicionado

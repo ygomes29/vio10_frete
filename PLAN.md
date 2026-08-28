@@ -146,8 +146,39 @@
     dispatch **65/65** — todas PASS (não simulado). Nenhum bug em runtime (lições da
     Sessão 07 — ambiguidade `as t` e PostGIS em `extensions` — aplicadas proativamente).
   - **Veredito**: GO para Sessão 09.
-- **Próxima**: Sessão 09 — bid engine (scoring + seleção + `claim_delivery` atômico;
-  `searching_driver → assigned`) — **GATE**.
+- **Sessão 09 (atual)**: Bid engine (scoring + seleção + `claim_delivery` atômico,
+  `searching_driver → assigned`) — **concluída — PASS**.
+  - **24 migrations** em `supabase/migrations/` (0001-0023 + **0024**
+    `select_winner_and_claim`). **Nenhuma tabela/coluna nova** — tudo já existe em
+    0005/0009/0010/0016.
+  - **ADR-014**: bid engine. D1 `select_winner_and_claim` system-only (terceiro
+    system-only; trust boundary de pesos de scoring); D2 fluxo (validate → coletar →
+    0: fechar manual | ≥1: pontuar → claim); D3 candidatos válidos = responded +
+    ainda-eligible (re-valida eligibility no close); D4 scoring min-max + pesos de param +
+    tie-break determinístico (`score desc, dist_m asc, responded_at asc, driver_id asc`);
+    D5 seleção≠confirmação (`claim_delivery` confirma); D6 auditoria via `delivery_events`
+    (scores no metadata, sem coluna de winner); D7 ator via `auth.uid`; D8 sem novos grants
+    de DML a `authenticated`, sem tabela/coluna nova.
+  - **0024** — `select_winner_and_claim` DEFINER system-only (`search_path = public,
+    extensions, pg_catalog` — PostGIS `ST_Distance`/`ST_DWithin`; grants só service_role,
+    authenticated sem EXECUTE — defesa em profundidade). Fecha a rodada, pontua candidatos
+    válidos (min-max de `bid_amount_cents` + `ST_Distance`, pesos de param), escolhe
+    vencedor, chama `claim_delivery` atomicamente. Sem vencedor → fecha + `no_candidates`
+    (orquestrador abre a próxima de raio maior). Com vencedor → `winner_selected` (scores
+    no metadata) + `claim_delivery` (atribui, fecha rodada, R16, `driver_assigned`).
+  - **Hardening — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` + replay **0001→0024 em ordem** → 24/24 limpo. Inventário: 26
+    tabelas (nenhuma nova), RLS 26/26, `select_winner_and_claim` DEFINER system-only
+    (execute só service_role, authenticated sem EXECUTE), `anon`=0 em `public`.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**,
+    dispatch **65/65**, bid **61/61** — todas PASS (não simulado). Bugs de teste
+    corrigidos (poluição cross-scenario via pickup compartilhado → isolamento por
+    longitude; asserção invertida T2). Nenhum bug de RPC em runtime (lições Sessão 07/08
+    aplicadas proativamente).
+  - **Veredito**: GO para Sessão 10.
+- **Próxima**: Sessão 10 — atribuição atômica em **concorrência real** (harness via
+  `dblink`/paralelismo, greenfield, ADR-007) — **GATE de produção**.
 
 ## Roadmap (20 fases / 29 sessões)
 

@@ -6,6 +6,66 @@
 
 ## Histórico
 
+### Sessão 09 — Bid engine (scoring + seleção + `claim_delivery` atômico) — PASS
+
+- **ADR-014** escrito **antes** do código (1 RPC system-only D1, fluxo D2, candidatos
+  válidos D3, scoring min-max D4, seleção≠confirmação D5, auditoria sem coluna de winner
+  D6, ator via `auth.uid` D7, sem novos grants/sem tabela nova D8) — regra mestra
+  respeitada. "IA não inventa entregador": o vencedor vem do scoring determinístico no
+  banco (min-max de `bid_amount_cents` + `ST_Distance`), não de IA; toda transição por
+  `transition_delivery` (via `claim_delivery`). "ACEITAR ≠ GANHAR" (ADR-006) garantido: a
+  seleção considera só quem ainda é válido no close e o claim é atômico.
+- **0024 — `select_winner_and_claim`** `SECURITY DEFINER` **system-only** (terceiro
+  system-only após `create_quote`/`open_dispatch_round`): `auth.uid() not null` →
+  `not_authorized`. Grants: `revoke public` + `execute` só a `service_role` —
+  `authenticated` **nem EXECUTE** (defesa em profundidade); `anon`: nada. **Trust
+  boundary correto:** pesos de scoring vêm do backend, não do business — um business
+  passando pesos forjaria o vencedor. Scoring `numeric` adimensional (não dinheiro;
+  `bid_amount_cents` permanece `bigint`). **Tie-break determinístico** `score desc,
+  dist_m asc, responded_at asc, driver_id asc`. `nullif` evita divisão por zero. Chama
+  `claim_delivery` com alias `as t` + `t.won, t.reason` (lição da Sessão 07 aplicada
+  proativamente). Re-valida eligibility no close (driver que aceitou mas foi atribuído a
+  outra corrida é excluído; offer → `lost`/`expired`). Sem vencedor → fecha rodada +
+  `no_candidates` (orquestrador abre a próxima de raio maior). Com vencedor →
+  `winner_selected` (scores no metadata) + `claim_delivery` (atribui, fecha, R16,
+  `driver_assigned`). Claim race → superseded + retorna o reason. **Nenhuma
+  tabela/coluna nova** — vencedor em `delivery_assignments`(active) +
+  `delivery_offers.status='won'` + `delivery_events`.
+- **`test_vio10_bid.sql`** (61 asserções, begin/rollback + SELECT consolidado): T1-T16
+  (basic win, no_candidates, counter_bid, weight_price=0, weight sensitivity,
+  eligibility re-check assignment-race/offline/expired, round_already_closed, wrong_state,
+  system-only, invalid_param, tie-break, fator constante/nullif, raio progressivo,
+  not_found). Geometria isolada por cenário (cada teste pickup em longitude distinta,
+  drivers em B+off; bases ~111km aparte → sem poluição cross-scenario). **61/61 PASS
+  (real)**.
+- **Bug de teste encontrado e corrigido na validação** (não bug de RPC): a 1ª versão
+  compartilhava pickup `(0,0)` entre todos os cenários → drivers de testes anteriores
+  vazavam para `open_dispatch_round` de testes posteriores (single-tx `begin/rollback`),
+  e com `max_candidates=10` polluters mais próximos crowding-out os drivers-alvo (T5a/T5b
+  vencedor errado, T15 count=10 em vez de 1/2). Corrigido com longitude de pickup distinta
+  por cenário. Mais uma asserção invertida (`T2_no_winner` expected `'f'`→`'t'`).
+  **Lição de teste single-tx:** cada cenário que cria drivers ativos/available/fresh num
+  mesmo `begin;…rollback;` polui a eligibility de cenários posteriores se compartilham a
+  pickup — isole por pickup geográfico distinto (drivers do teste em B+off; bases >> raio).
+- **Proativamente sem bugs de RPC em runtime**: a lição da Sessão 07 (ambiguidade `as t`
+  ao chamar `returns table(...)` de dentro de outra `returns table(...)`) foi aplicada em
+  0024 ao chamar `claim_delivery`; a lição da Sessão 08 (PostGIS `st_*` não-qualificado,
+  vive em `extensions`) também. Replay 24/24 "limpo" não garante runtime — a suíte bid
+  confirmou (61/61 na 2ª execução; as 5 falhas da 1ª eram bugs de teste, não de RPC).
+- **Reset/replay from-scratch**: `drop schema public cascade` + `delete from auth.users`
+  + recriar `public` (via SQL + Management API) + replay **0001→0024 em ordem** → 24/24
+  limpo. Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `select_winner_and_claim`
+  DEFINER system-only (execute só service_role, authenticated sem EXECUTE), `anon`=0 em
+  `public`.
+- **Suítes re-executadas após reset from-scratch**: invariants **13/13**, rpcs **48/48**,
+  authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**, dispatch
+  **65/65**, bid **61/61** — todas PASS (não simulado).
+- **Risco aberto (BAIXO) — inalterado**: offboarding/revogação de papel/membership
+  (`remove_platform_role`, `remove_org_member`) ainda deferido (lado driver FECHADO desde
+  Sessão 06). Nenhum novo risco aberto na Sessão 09.
+- **Veredito**: GO para Sessão 10 (atribuição atômica em **concorrência real** — GATE de
+  produção; harness via `dblink`/paralelismo, greenfield, ADR-007).
+
 ### Sessão 08 — Dispatch engine (busca de candidatos + raio progressivo) — PASS
 
 - **ADR-013** escrito **antes** do código (2 RPCs/2 trust boundaries D1/D2, eligibility MVP
