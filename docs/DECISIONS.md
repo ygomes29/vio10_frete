@@ -22,6 +22,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-009 | Matriz RBAC (papel × recurso × ação) — escopo MVP | Aprovado (Sessão 04) |
 | ADR-010 | Ciclo de vida de identidade e autenticação (MVP) | Aprovado (Sessão 05) |
 | ADR-011 | Criação da corrida + gestão de entidades (empresas/veículos/entregadores) | Aprovado (Sessão 06) |
+| ADR-012 | Pricing engine determinístico (cotação, `draft → quoted`) | Aprovado (Sessão 07) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -124,6 +125,42 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 07 — Pricing engine determinístico (ADR-012)
+
+- **`create_quote` é system-scoped apenas (primeiro RPC system-only)** (ADR-012 D1):
+  `auth.uid() IS NOT NULL` → `not_authorized`. Só o backend (`service_role`) chama.
+  **Trust boundary:** distância/duração são **insumos do cálculo** vindos do provider
+  de rota (plataforma, Sessão 20), não do business — um business autenticado passando
+  `p_distance_meters` forjaria distância pequena → preço baixo. Grants: `revoke public`
+  + `execute` só a `service_role` — `authenticated` **nem EXECUTE** recebe (defesa em
+  profundidade: bloqueio no nível de privilégio antes da checagem interna de
+  `auth.uid()`); `anon`: nada. Distinto de `create_delivery_request` (permite membro de
+  org): endereços são do business; a distância é da plataforma.
+- **Álgebra determinística** (ADR-012 D2, do exemplo do doc): `customer_price =
+  subtotal + platform_fee`; `driver_offer = subtotal − platform_fee`; margem plataforma
+  = `2 × platform_fee` (fee dos dois lados). `distance_component = (per_km_cents ×
+  meters + 999) / 1000` (ceil inteiro, **sem float**). `vehicle_component` e
+  `dynamic_component` = **0 no MVP** (custo do veículo codificado pela seleção da regra
+  por `vehicle_type`; demanda/pico deferido). `subtotal = greatest(raw, min_price_cents)`
+  (piso do subtotal). `driver_offer < 0` → `pricing_error` (regra mal-config).
+- **Faixa min/max real** (ADR-012 D3): `pricing_rules` +`min_multiplier`/`max_multiplier`
+  numeric(5,4) default 1.0. `delivery_quotes` +`min/max_customer_price_cents`/`min/max
+  _driver_offer_cents`. `min_customer = greatest(min_price, floor(customer×min_mult))`;
+  `max_customer = ceil(customer×max_mult)`; análogo p/ driver. Default 1.0/1.0 → faixa
+  degenerada; orgs configuram banda real (ex.: 0.90/1.10). `customer_price`/`driver_offer`
+  = alvo determinístico; min/max = faixa exibida ao business / banda de lances.
+- **Seleção de regra org → global fallback** (ADR-012 D4): regra da org (mesmo
+  `vehicle_type`, ativa, `effective_from ≤ now`) → fallback global
+  (`organization_id is null`) → `no_pricing_rule`.
+- **Atomicidade transition-FIRST** (ADR-012 D5): `create_quote` chama
+  `transition_delivery('quoted')` **antes** de insertar `delivery_quotes`; se a transição
+  falhar (ex.: `wrong_state` em race), retorna **sem** insertar (sem quote órfã). Tudo
+  numa transação DEFINER.
+- **TTL/estado/idempotência** (ADR-012 D7/D8): `expires_at = now()+900s`, `status=
+  'pending'`. `confirmed_at`/`confirmed` é setado em `quoted→searching_driver` (Sessão
+  08), não aqui. Re-cotar corrida já `quoted` → `wrong_state` (idempotência por estado,
+  sem `idempotency_key`/`external_reference`).
 
 ## Decisões ainda em aberto (a resolver nas próximas sessões)
 

@@ -312,6 +312,67 @@ Formato: sessão + data + escopo.
   chamar `create_vehicle(v_drv, …)` (mesmo driver, placa duplicada) em vez de `v_drv2`
   (que falhava authz antes do conflito de placa). 37/37 após o ajuste.
 
+## [Sessão 07] — 2026-08-28 — Pricing engine determinístico (cotação, `draft → quoted`)
+
+### Adicionado
+- **ADR-012** — pricing engine determinístico. D1 `create_quote` system-only (primeiro
+  RPC system-only; `auth.uid() not null` → `not_authorized`; trust boundary de insumos
+  de rota); D2 álgebra determinística (`customer=subtotal+fee`, `driver=subtotal−fee`,
+  `distance_component` ceil inteiro, `vehicle`/`dynamic`=0 no MVP, `subtotal=greatest
+  (raw,min_price)`); D3 faixa min/max real via multipliers; D4 seleção de regra
+  org→global→`no_pricing_rule`; D5 atomicidade transition-first; D6 ator via `auth.uid`;
+  D7 TTL 900s `pending`; D8 idempotência por estado.
+- **Migration 0022** — `create_quote` `SECURITY DEFINER` (system-only) + ALTERs em
+  `pricing_rules` (+`min_multiplier`/`max_multiplier` numeric(5,4)) e `delivery_quotes`
+  (+`min/max_customer_price_cents`/`min/max_driver_offer_cents`). **Nenhuma tabela nova.**
+  Grants: `revoke public` + `execute` só a `service_role` (`authenticated` sem EXECUTE —
+  defesa em profundidade); `anon`: nada.
+- **`supabase/tests/test_vio10_pricing.sql`** — 62 asserções (begin/rollback + SELECT
+  consolidado). Cotação moto standard (componentes, subtotal, customer/driver, faixa
+  min/max, snapshot, status `quoted`, `quoted_at`, evento `quote_created` com
+  `quote_id`); urgent; carro vs moto; `min_price` floor; faixa não-degenerada;
+  `pricing_error` (driver<0); `no_pricing_rule`; fallback global; `wrong_state`;
+  `invalid_distance`/`invalid_duration`; authz (autenticado → `not_authorized`, system
+  → ok); `distance_component` ceil (1001m).
+
+### Decisões
+- **Faixa min/max real** (não cotação única): o motor calcula piso+teto via multipliers;
+  `customer_price`/`driver_offer` = alvo; min/max = faixa ao business / banda de lances.
+- **`create_quote` system-only**: insumos de pricing (distância/duração) vêm do backend
+  (provider na Sessão 20), não do business; o dashboard chama um Route Handler do
+  backend, que chama `create_quote` system-scoped (Sessão 18).
+- **`vehicle_component`/`dynamic_component` = 0 no MVP**: custo do veículo codificado
+  pela regra por `vehicle_type`; demanda/pico deferido (sem coluna de config).
+- **`per_minute_cents` reservado**: não usado na fórmula MVP (componentes do doc não
+  incluem duration); `duration_seconds` é snapshot. Reuso futuro.
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- **Reset from-scratch** via SQL + **replay 0001→0022 em ordem** — 22/22 limpo (sem
+  MIGFAIL).
+- Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `create_quote` `SECURITY DEFINER`
+  (primeiro system-only), `pricing_rules`+multipliers, `delivery_quotes`+min/max,
+  `authenticated` **sem EXECUTE** em `create_quote` (`service_role` com EXECUTE),
+  `anon`=0 grants em `public`.
+- `test_vio10_invariants.sql` → **13/13 PASS**; `test_vio10_rpcs.sql` → **48/48 PASS**;
+  `test_vio10_authz.sql` → **21/21 PASS**; `test_vio10_auth_lifecycle.sql` → **34/34
+  PASS**; `test_vio10_creation.sql` → **37/37 PASS**; `test_vio10_pricing.sql` →
+  **62/62 PASS** — todas reais (não simulado).
+- Veredito **GO → Sessão 08** (dispatch: busca de candidatos + raio progressivo).
+
+### Corrigido (durante a validação real)
+- **Ambiguidade PL/pgSQL em `create_quote` (0022)**: `select ok, reason from
+  transition_delivery(...)` era ambíguo (ERRO 42702) — os nomes das colunas de saída de
+  `create_quote` (`returns table(ok, reason, quote_id)`) viram variáveis implícitas no
+  corpo, conflitando com as colunas do retorno de `transition_delivery`. Corrigido
+  aliasando a subquery: `from transition_delivery(...) as t` e referindo `t.ok, t.reason`.
+  **Lição:** `create or replace function` não executa o corpo ao aplicar a migration —
+  replay 22/22 "limpo" não garante que a função funciona; a suíte que exerce a RPC pega o
+  bug em runtime. Sempre rodar a suíte da RPC, não só confiar no replay.
+- **`test_vio10_pricing.sql`**: dois bugs de teste — `insert into pr_results ... values
+  (t, exp, exp=act)` tinha 3 valores para 4 colunas (faltava `act`); `(quoted_at is not
+  null)::text` devolve `'true'`/`'false'` (não `'t'`/`'f'`) — trocado por `case`. 62/62
+  após os ajustes.
+
 ## [Sessão 01] — 2026-08-27 — Diagnóstico
 - Repositório confirmado greenfield.
 - Arquitetura proposta e aprovada com ajustes (ver Sessão 02).

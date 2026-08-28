@@ -149,7 +149,21 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   nova. Hardening: reset via SQL + replay 0001→0021 limpo (21/21); invariants 13/13,
   rpcs 48/48, authz 21/21, auth_lifecycle 34/34, creation 37/37 PASS. Bug T4 corrigido
   na validação (JWT residual em `create_vehicle`).
-- **Próxima**: Sessão 07 — pricing engine determinístico (cotação, `delivery_quotes`,
-  `draft → quoted`).
+- **Sessão 07 (concluída)**: Pricing engine determinístico (cotação, `draft → quoted`)
+  — **PASS**. 22 migrations (**0022** `create_quote` DEFINER; altera `pricing_rules`
+  +`min/max_multiplier` e `delivery_quotes` +min/max customer/driver; **nenhuma tabela
+  nova**). ADR-012 (D1 `create_quote` **system-only** — primeiro RPC system-only,
+  `auth.uid() not null`→`not_authorized`, trust boundary de insumos de rota do backend;
+  D2 álgebra `customer=subtotal+fee`/`driver=subtotal−fee`, `distance_component` ceil
+  inteiro, `vehicle`/`dynamic`=0 no MVP; D3 faixa min/max via multipliers; D4 regra
+  org→global→`no_pricing_rule`; D5 atomicidade transition-first; D6 ator via `auth.uid`;
+  D7 TTL 900s `pending`; D8 idempotência por estado). Grants: `revoke public` + `execute`
+  só a `service_role` (`authenticated` sem EXECUTE; `anon` nada). Hardening: reset via
+  SQL + replay 0001→0022 limpo (22/22); invariants 13/13, rpcs 48/48, authz 21/21,
+  auth_lifecycle 34/34, creation 37/37, pricing 62/62 PASS. Bug de ambiguidade PL/pgSQL
+  corrigido na validação (`select ok, reason`→ alias `t.ok, t.reason` — colunas de saída
+  de `returns table` viram variáveis implícitas).
+- **Próxima**: Sessão 08 — dispatch (busca de candidatos + raio progressivo;
+  `quoted → searching_driver`, confirma quote, seta `confirmed_at`).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

@@ -71,6 +71,17 @@ Regras:
 4. **Promoção proibida**: uma ação iniciada por usuário roda user-scoped. O backend não
    a "promove" a system-scoped para contornar RLS. Se o usuário não teria direito via
    RLS, o backend também não concede.
+5. **RPC system-only (`create_quote`, Sessão 07, ADR-012 D1)**: primeira RPC que **não
+   aceita caller autenticado de forma alguma** — `auth.uid() IS NOT NULL` →
+   `not_authorized`. `revoke all from public` + `grant execute to service_role`
+   **somente**: `authenticated` **nem EXECUTE** recebe (defesa em profundidade —
+   bloqueio no nível de privilégio antes da checagem interna de `auth.uid()`); `anon`:
+   nada. **Trust boundary:** os insumos de pricing (distância/duração) são do provider
+   de rota (plataforma, Sessão 20), não do business — um business passando
+   `p_distance_meters` forjaria distância pequena → preço baixo. O dashboard "solicitar
+   cotação" chama um Route Handler do backend, que chama `create_quote` system-scoped
+   (Sessão 18). Distinto de `create_delivery_request` (aceita membro de org): os
+   endereços da corrida são do business; a distância é da plataforma.
 
 ### Auth de usuários — identidade, convite e atribuição de papel (Sessão 05, ADR-010)
 
@@ -127,6 +138,7 @@ tabelas; a única mutação user-facing é a RPC, que checa `auth.uid()` interna
 | `set_current_vehicle` | driver dono do veículo **ou** `is_super_or_admin()` | permitido |
 | `update_driver_status` | `is_super_or_admin()` apenas | **negado** |
 | `create_delivery_request` | membro da org (`organization_memberships`) **ou** `is_platform_admin()` (admin/operator) | **permitido** (api/integration/whatsapp) |
+| `create_quote` | **negado** (system-only — `auth.uid() IS NOT NULL` → `not_authorized`; `authenticated` sem EXECUTE) | **permitido** (backend cota `draft→quoted`; insumos de rota da plataforma) |
 
 Notas:
 - **`create_organization` = super/admin apenas**: criar tenant é ato de plataforma. O

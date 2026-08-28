@@ -167,6 +167,47 @@ change: `create unique index idx_vehicles_plate_uk on public.vehicles(plate)` (0
 corrida é imposta no banco (RPC DEFINER valida tenancy) **e** no serviço (authz antes
 da RPC) — igual ao padrão de atribuição.
 
+### 4.3 RPC de pricing (Sessão 07, ADR-012)
+
+Implementada em `supabase/migrations/0022_pricing_engine.sql` (1 RPC + ALTERs em
+`pricing_rules`/`delivery_quotes`). **Nenhuma tabela nova.** **Modelo B**:
+`SECURITY DEFINER` + `set search_path = public, pg_catalog`.
+
+- **`create_quote(p_delivery_request_id, p_distance_meters integer,
+  p_duration_seconds integer, p_correlation_id uuid default gen_random_uuid())`**
+  → `table(ok boolean, reason text, quote_id uuid)`. **Primeiro RPC system-only**
+  (ADR-012 D1): `auth.uid() IS NOT NULL` → `(false,'not_authorized',null)`. Grants:
+  `revoke all from public` + `grant execute to service_role` **somente** —
+  `authenticated` **não recebe EXECUTE** (defesa em profundidade; `anon`: nada).
+  **Trust boundary:** os insumos de pricing (distância/duração) vêm do backend (provider
+  de rota na Sessão 20), nunca do business — o dashboard "solicitar cotação" chama um
+  Route Handler do backend, que chama `create_quote` system-scoped (Sessão 18).
+- **Validações**: delivery existe e `status='draft'` (senão `wrong_state`);
+  `vehicle_required` not null; `p_distance_meters > 0` (`invalid_distance`);
+  `p_duration_seconds > 0` (`invalid_duration`).
+- **Seleção de regra** (D4): org-specific (`organization_id` + `vehicle_type` + ativa +
+  `effective_from ≤ now()`, mais recente) → fallback global (`organization_id is null`)
+  → `no_pricing_rule`.
+- **Cálculo** (D2): `base`, `distance_component = (per_km_cents × meters + 999)/1000`
+  (ceil inteiro, sem float), `vehicle_component=0`, `urgency_component` (se `urgent`),
+  `dynamic_component=0`; `subtotal = greatest(raw, min_price_cents)`; `customer_price =
+  subtotal + platform_fee`; `driver_offer = subtotal − platform_fee` (`<0` →
+  `pricing_error`). Faixa min/max (D3) via `min_multiplier`/`max_multiplier` (floor/ceil
+  → bigint).
+- **Atomicidade** (D5): chama `transition_delivery(p_id,'quoted','system',null,
+  metadata{quote_id, preços, pricing_rule_id}, p_correlation_id)` **antes** do insert —
+  se `not ok`, retorna **sem** insertar (sem quote órfã). Se ok, inserta `delivery_quotes`
+  (`status='pending'`, `expires_at=now()+900s`, snapshot completo). Externamente atômico:
+  ninguém observa `quoted` sem quote (mesma transação).
+- **Ator** (D6): system path → evento `quote_created` com `actor_type='system'`
+  (`auth.uid()` null); ator deriva de `auth.uid()`, nunca de param.
+
+**Sem novos grants de DML a `authenticated`**; `authenticated` mantém SELECT sob RLS
+(0017) em `delivery_quotes`/`pricing_rules` (vê a quote da sua org via
+`can_view_delivery_request` e regras da sua org/global). Único grant novo: `execute on
+create_quote to service_role`. `quoted_at`/`quote_created` são setados por
+`transition_delivery` (0016, já na matriz).
+
 ## 5. Idempotência
 
 - Endpoints mutantes aceitam cabeçalho `Idempotency-Key`.

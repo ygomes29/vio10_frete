@@ -6,6 +6,48 @@
 
 ## Histórico
 
+### Sessão 07 — Pricing engine determinístico (cotação, `draft → quoted`) — PASS
+
+- **ADR-012** escrito **antes** do código (system-only, álgebra D2, faixa min/max D3,
+  seleção de regra org→global D4, atomicidade transition-first D5, ator via `auth.uid`
+  D6, TTL/estado D7/D8) — regra mestra respeitada. "IA não inventa preço" garantido: o
+  valor cobrado/devido vem do motor determinístico, não de IA.
+- **0022 — `create_quote`** `SECURITY DEFINER` **system-only** (primeiro RPC system-only):
+  `auth.uid() IS NOT NULL` → `not_authorized`. Grants: `revoke public` + `execute` só a
+  `service_role` — `authenticated` **nem EXECUTE** (defesa em profundidade antes da
+  checagem interna); `anon`: nada. **Trust boundary correto:** insumos de rota
+  (distância/duração) vêm do backend (provider Sessão 20), não do business. Álgebra em
+  `bigint` cents, `distance_component` por divisão inteira com ceil (sem float no
+  dinheiro). `vehicle_component`/`dynamic_component` = 0 (explícito no snapshot). Faixa
+  min/max via multipliers (`numeric` floor/ceil → bigint). Atomicidade: chama
+  `transition_delivery('quoted')` **antes** do insert — se falhar, retorna sem insertar
+  (sem quote órfã). Nenhuma tabela nova; colunas herdam RLS de 0012/0017.
+- **`test_vio10_pricing.sql`** (62 asserções, begin/rollback + SELECT consolidado):
+  componentes/álgebra/faixa/snapshot/status/evento; urgent; carro vs moto; `min_price`
+  floor; faixa não-degenerada; `pricing_error`; `no_pricing_rule`; fallback global;
+  `wrong_state`; `invalid_distance`/`invalid_duration`; authz (autenticado negado /
+  system ok); `distance_component` ceil. **62/62 PASS (real)**.
+- **Bug real encontrado e corrigido na validação**: `select ok, reason from
+  transition_delivery(...)` dentro de `create_quote` era **ambíguo** (ERRO 42702) — em
+  PL/pgSQL, as colunas de saída de `returns table(ok, reason, quote_id)` viram variáveis
+  implícitas no corpo, conflitando com as colunas do retorno de `transition_delivery`.
+  Corrigido aliasando: `from transition_delivery(...) as t` + `t.ok, t.reason`.
+  **Lição:** `create or replace function` **não executa o corpo** ao aplicar a migration
+  — replay 22/22 "limpo" não garante que a função funciona; o bug só apareceu em
+  runtime (suíte de pricing). Replay não substitui exercitar a RPC.
+- **Reset/replay from-scratch**: `drop schema public cascade` + `delete from auth.users`
+  + recriar `public` (via SQL + Management API) + replay **0001→0022 em ordem** → 22/22
+  limpo. Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `create_quote` DEFINER,
+  `authenticated` sem EXECUTE em `create_quote`, `service_role` com EXECUTE, `anon`=0 em
+  `public`.
+- **Suítes re-executadas após reset from-scratch**: invariants **13/13**, rpcs **48/48**,
+  authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62** —
+  todas PASS (não simulado).
+- **Risco aberto (BAIXO) — inalterado**: offboarding/revogação de papel/membership
+  (`remove_platform_role`, `remove_org_member`) ainda deferido (lado driver FECHADO
+  desde a Sessão 06). Nenhum novo risco aberto na Sessão 07.
+- **Veredito**: GO para Sessão 08 (dispatch: busca de candidatos + raio progressivo).
+
 ### Sessão 06 — Criação da corrida + gestão de empresas/veículos/entregadores — PASS
 
 - **ADR-011** escrito **antes** do código (criação=draft sem preço, snapshots,

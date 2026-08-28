@@ -70,7 +70,7 @@
     "reset/replay não executado" (BAIXO, Sessão 04) **FECHADO**.
   - Revogação de papel / offboarding e limpeza assíncrona de convites expirados
     **adiados** (Sessão 06+; `accept_invitation` já rejeita expirados).
-- **Sessão 06 (atual)**: Criação da corrida + gestão de empresas/veículos/entregadores —
+- **Sessão 06**: Criação da corrida + gestão de empresas/veículos/entregadores —
   **concluída — PASS**.
   - **21 migrations** em `supabase/migrations/` (0001-0019 + **0020** management RPCs +
     **0021** `create_delivery_request`). **Nenhuma tabela nova**; único schema change:
@@ -96,8 +96,31 @@
     authz **21/21**, auth_lifecycle **34/34**, creation **37/37** — todas PASS (não
     simulado). Bug T4 corrigido na validação (JWT residual em `create_vehicle`).
   - **Veredito**: GO para Sessão 07.
-- **Próxima**: Sessão 07 — pricing engine determinístico (cotação, `delivery_quotes`,
-  `draft → quoted`).
+- **Sessão 07 (atual)**: Pricing engine determinístico (cotação, `draft → quoted`) —
+  **concluída — PASS**.
+  - **22 migrations** em `supabase/migrations/` (0001-0021 + **0022** `create_quote`).
+  **Nenhuma tabela nova**; altera `pricing_rules` (+`min_multiplier`/`max_multiplier`) e
+  `delivery_quotes` (+`min/max_customer_price_cents`/`min/max_driver_offer_cents`).
+  - **ADR-012**: pricing determinístico. D1 `create_quote` **system-only** (primeiro
+    RPC system-only; `auth.uid() not null`→`not_authorized`; trust boundary de insumos
+    de rota do backend); D2 álgebra (`customer=subtotal+fee`, `driver=subtotal−fee`,
+    `distance_component` ceil inteiro, `vehicle`/`dynamic`=0 no MVP); D3 faixa min/max
+    via multipliers; D4 regra org→global→`no_pricing_rule`; D5 atomicidade
+    transition-first; D6 ator via `auth.uid`; D7 TTL 900s `pending`; D8 idempotência por
+    estado.
+  - **0022** — `create_quote` DEFINER (system-only; `revoke public` + `execute` só a
+    `service_role`, `authenticated` sem EXECUTE; `anon` nada).
+  - **Hardening — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` + replay **0001→0022 em ordem** → 22/22 limpo. Inventário:
+    26 tabelas, RLS 26/26, `create_quote` DEFINER, colunas novas, `authenticated` sem
+    EXECUTE em `create_quote`, `anon`=0 em `public`.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62** —
+    todas PASS (não simulado). Bug de ambiguidade PL/pgSQL corrigido (`select ok, reason`
+    → alias `t.ok, t.reason`).
+  - **Veredito**: GO para Sessão 08.
+- **Próxima**: Sessão 08 — dispatch (busca de candidatos + raio progressivo;
+  `quoted → searching_driver`, confirma quote, seta `confirmed_at`).
 
 ## Roadmap (20 fases / 29 sessões)
 
