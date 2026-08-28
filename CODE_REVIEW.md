@@ -6,6 +6,53 @@
 
 ## Histórico
 
+### Sessão 08 — Dispatch engine (busca de candidatos + raio progressivo) — PASS
+
+- **ADR-013** escrito **antes** do código (2 RPCs/2 trust boundaries D1/D2, eligibility MVP
+  D3, criação atômica D4, raio progressivo orquestrado D5, atomicidade/guards D6, ator via
+  `auth.uid` D7, sem novos grants/sem tabela nova D8) — regra mestra respeitada. "IA não
+  inventa entregador ou status": candidatos vêm da query de eligibility do banco, não de IA;
+  toda transição por `transition_delivery`.
+- **0023 — 2 RPCs `SECURITY DEFINER`**:
+  - `confirm_quote` (user-scoped, `search_path = public, pg_catalog`): authz system/
+    `is_platform_admin()`/membro da org; valida `quoted` + quote `pending` não expirada;
+    **transition-first** (alias `as t` + `t.ok, t.reason` — lição da Sessão 07 aplicada
+    proativamente, sem ambiguidade 42702); se falhar, retorna sem marcar (sem órfã);
+    confirma quote + emite `quote_confirmed`. Grants: `service_role`+`authenticated`
+    (user-facing); `anon`: nada.
+  - `open_dispatch_round` (system-only, segundo após `create_quote`,
+    `search_path = public, extensions, pg_catalog`): `auth.uid() not null` →
+    `not_authorized`; grants só a `service_role` (`authenticated` sem EXECUTE — defesa em
+    profundidade). Cria `dispatch_round` + `delivery_offers` por candidato elegível
+    atomicamente; `round_already_open` guard; `round_number` monotônico; cria rodada mesmo
+    com 0 candidatos (audit). PostGIS `st_dwithin`/`st_distance` **não-qualificados**
+    (vivem em `extensions`, não `public` — armadilha evitada proativamente).
+- **`test_vio10_dispatch.sql`** (65 asserções, begin/rollback + SELECT consolidado):
+  `confirm_quote` (membro org; authz wrong-org/system/re-confirm/wrong_state/expired);
+  `open_dispatch_round` (rodada 1 raio 2000 → 2 candidatos; system-only; eligibility
+  radius 500; max_candidates; round_already_open; raio progressivo round 2; wrong_state;
+  0 candidatos; invalid_param). Geometria no equador (distâncias determinísticas).
+  **65/65 PASS (real)**.
+- **Proativamente sem bugs de validação**: a lição da Sessão 07 (ambiguidade PL/pgSQL
+  `as t`) foi aplicada em `confirm_quote` antes do replay; a lição do PostGIS em
+  `extensions` (não `public`) foi aplicada em `open_dispatch_round` antes do replay. O
+  replay 23/23 "limpo" não garante runtime — mas as suítes confirmam runtime. **Nenhum bug
+  encontrado na validação** (primeira sessão sem correção em runtime desde a 03.5).
+- **Reset/replay from-scratch**: `drop schema public cascade` + `delete from auth.users`
+  + recriar `public` (via SQL + Management API) + replay **0001→0023 em ordem** → 23/23
+  limpo. Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `confirm_quote` DEFINER (execute
+  service_role+authenticated), `open_dispatch_round` DEFINER system-only (execute só
+  service_role, authenticated sem EXECUTE), `anon`=0 em `public`.
+- **Suítes re-executadas após reset from-scratch**: invariants **13/13**, rpcs **48/48**,
+  authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**, dispatch
+  **65/65** — todas PASS (não simulado). Nota: pgTAP `finish()` neste dev emite via RAISE
+  (0 rows no resultset); `num_failed()=0` é a autoridade + último resultset confirma nº de
+  testes.
+- **Risco aberto (BAIXO) — inalterado**: offboarding/revogação de papel/membership
+  (`remove_platform_role`, `remove_org_member`) ainda deferido (lado driver FECHADO desde
+  Sessão 06). Nenhum novo risco aberto na Sessão 08.
+- **Veredito**: GO para Sessão 09 (bid engine + atribuição atômica — GATE).
+
 ### Sessão 07 — Pricing engine determinístico (cotação, `draft → quoted`) — PASS
 
 - **ADR-012** escrito **antes** do código (system-only, álgebra D2, faixa min/max D3,

@@ -50,6 +50,15 @@ draft → quoted → searching_driver → assigned → driver_to_pickup
 > atualiza o timestamp correspondente ao destino, supersede a assignment anterior em
 > reatribuição (`assigned`/`driver_to_pickup`/`in_transit` → `searching_driver`) e
    insere `delivery_event`. Autorização por ator será reforçada na Sessão 04/11.
+
+> **Implementação (Sessão 07):** `draft → quoted` é via `create_quote` (system-only,
+> ADR-012). **Implementação (Sessão 08):** `quoted → searching_driver` é via
+> `confirm_quote` (user-scoped: business/operator/admin/membro da org ou system, ADR-013
+> D1) — confirma a cotação pendente (`delivery_quotes.status='pending'` → `confirmed`,
+> `confirmed_at` setado), com atomicidade transition-first (sem quote confirmed órfã).
+> `searching_driver → assigned` continua via `claim_delivery` (0013), mas a **seleção do
+> vencedor** (fechar rodada, scoring, escolher) é a **Sessão 09-10** (GATE) — a Sessão 08
+> só abre rodadas (`open_dispatch_round`, system-only) e cria offers.
 2. Cada transição importante valida:
    - estado atual permite o destino;
    - ator é autorizado para a transição;
@@ -62,9 +71,9 @@ draft → quoted → searching_driver → assigned → driver_to_pickup
 
 | Transição | Autorizado |
 |---|---|
-| draft → quoted | sistema (pricing) |
-| quoted → searching_driver | business_owner/user, operator (confirma) |
-| searching_driver → assigned | sistema (claim atômico após seleção) |
+| draft → quoted | sistema (pricing, `create_quote` — ADR-012) |
+| quoted → searching_driver | business_owner/user, operator, admin, sistema (`confirm_quote` — ADR-013; confirma a cotação pendente) |
+| searching_driver → assigned | sistema (claim atômico após seleção — Sessão 09-10) |
 | searching_driver → expired | sistema (rodadas esgotadas) |
 | → cancelled (pré-atribuição) | business_owner/user, operator, admin |
 | assigned → driver_to_pickup | driver (ou sistema via confirmação) |

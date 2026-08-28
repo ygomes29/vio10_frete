@@ -119,8 +119,35 @@
     todas PASS (não simulado). Bug de ambiguidade PL/pgSQL corrigido (`select ok, reason`
     → alias `t.ok, t.reason`).
   - **Veredito**: GO para Sessão 08.
-- **Próxima**: Sessão 08 — dispatch (busca de candidatos + raio progressivo;
-  `quoted → searching_driver`, confirma quote, seta `confirmed_at`).
+- **Sessão 08 (atual)**: Dispatch engine (busca de candidatos + raio progressivo,
+  `quoted → searching_driver`) — **concluída — PASS**.
+  - **23 migrations** em `supabase/migrations/` (0001-0022 + **0023** `confirm_quote` +
+    `open_dispatch_round`). **Nenhuma tabela/coluna nova** — tudo já existe em
+    0005/0009/0010.
+  - **ADR-013**: dispatch engine. D1 `confirm_quote` user-scoped (membro da org/operator/
+    admin/system confirma cotação pendente; transition-first `quoted→searching_driver`,
+    marca quote `confirmed`+`confirmed_at`, sem órfã); D2 `open_dispatch_round` system-only
+    (segundo system-only; trust boundary de insumos de dispatch); D3 eligibility MVP
+    (active+available+veículo compatível+sem assignment ativa+localização fresca+`ST_DWithin`
+    no raio; `service_areas` por entregador adiado); D4 criação atômica de rodada+offers;
+    D5 raio progressivo orquestrado (não no RPC); D6 atomicidade/guards; D7 ator via
+    `auth.uid`; D8 sem novos grants de DML a `authenticated`, sem tabela nova.
+  - **0023** — 2 RPCs DEFINER: `confirm_quote` (user-scoped; grants service_role+
+    authenticated) e `open_dispatch_round` (system-only; grants só service_role,
+    authenticated sem EXECUTE — defesa em profundidade). PostGIS `st_dwithin`/`st_distance`
+    não-qualificados (schema `extensions`). `offered` reservado (não muta availability).
+  - **Hardening — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` + replay **0001→0023 em ordem** → 23/23 limpo. Inventário: 26
+    tabelas (nenhuma nova), RLS 26/26, `confirm_quote` DEFINER (execute service_role+
+    authenticated), `open_dispatch_round` DEFINER system-only (execute só service_role,
+    authenticated sem EXECUTE), `anon`=0 em `public`.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**,
+    dispatch **65/65** — todas PASS (não simulado). Nenhum bug em runtime (lições da
+    Sessão 07 — ambiguidade `as t` e PostGIS em `extensions` — aplicadas proativamente).
+  - **Veredito**: GO para Sessão 09.
+- **Próxima**: Sessão 09 — bid engine (scoring + seleção + `claim_delivery` atômico;
+  `searching_driver → assigned`) — **GATE**.
 
 ## Roadmap (20 fases / 29 sessões)
 

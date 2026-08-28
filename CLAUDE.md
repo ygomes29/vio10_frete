@@ -163,7 +163,23 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   auth_lifecycle 34/34, creation 37/37, pricing 62/62 PASS. Bug de ambiguidade PL/pgSQL
   corrigido na validação (`select ok, reason`→ alias `t.ok, t.reason` — colunas de saída
   de `returns table` viram variáveis implícitas).
-- **Próxima**: Sessão 08 — dispatch (busca de candidatos + raio progressivo;
-  `quoted → searching_driver`, confirma quote, seta `confirmed_at`).
+- **Sessão 08 (concluída)**: Dispatch engine (busca de candidatos + raio progressivo,
+  `quoted → searching_driver`) — **PASS**. 23 migrations (**0023** 2 RPCs DEFINER:
+  `confirm_quote` user-scoped + `open_dispatch_round` system-only; **nenhuma tabela nova**).
+  ADR-013 (D1 `confirm_quote` user-scoped confirma cotação pendente, transition-first,
+  marca quote `confirmed`+`confirmed_at`; D2 `open_dispatch_round` system-only, segundo
+  system-only, trust boundary de insumos de dispatch; D3 eligibility MVP —
+  active+available+veículo compatível+sem assignment ativa+localização fresca+`ST_DWithin`
+  no raio, `service_areas` por entregador adiado; D4 criação atômica de rodada+offers; D5
+  raio progressivo orquestrado; D6 atomicidade/guards; D7 ator via `auth.uid`; D8 sem
+  novos grants de DML a `authenticated`, sem tabela nova). `offered` reservado (não muta
+  availability; guard dupla offer = UK round+driver). Hardening: reset via SQL + replay
+  0001→0023 limpo (23/23); invariants 13/13, rpcs 48/48, authz 21/21, auth_lifecycle 34/34,
+  creation 37/37, pricing 62/62, dispatch 65/65 PASS. Lições da Sessão 07 (ambiguidade
+  `as t` + PostGIS em `extensions` não `public`) aplicadas proativamente — nenhum bug em
+  runtime. pgTAP `finish()` neste dev emite via RAISE (0 rows); `num_failed()=0` é a
+  autoridade.
+- **Próxima**: Sessão 09 — bid engine (scoring + seleção + `claim_delivery` atômico;
+  `searching_driver → assigned`) — **GATE**.
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

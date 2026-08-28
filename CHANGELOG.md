@@ -312,6 +312,69 @@ Formato: sessão + data + escopo.
   chamar `create_vehicle(v_drv, …)` (mesmo driver, placa duplicada) em vez de `v_drv2`
   (que falhava authz antes do conflito de placa). 37/37 após o ajuste.
 
+## [Sessão 08] — 2026-08-28 — Dispatch engine (busca de candidatos + raio progressivo)
+
+### Adicionado
+- **ADR-013** — dispatch engine. D1 `confirm_quote` user-scoped (membro da org/operator/
+  admin/system confirma a cotação pendente; transition-first `quoted→searching_driver`,
+  marca quote `confirmed`+`confirmed_at`, sem órfã); D2 `open_dispatch_round` system-only
+  (segundo system-only após `create_quote`; trust boundary de insumos de dispatch);
+  D3 eligibility MVP (active+available+veículo compatível+sem assignment ativa+localização
+  fresca+`ST_DWithin` no raio); D4 criação atômica de rodada+offers; D5 raio progressivo
+  orquestrado (não no RPC); D6 atomicidade/guards; D7 ator via `auth.uid`; D8 sem novos
+  grants de DML a `authenticated`, sem tabela nova.
+- **Migration 0023** — 2 RPCs `SECURITY DEFINER`: `confirm_quote` (user-scoped,
+  `search_path = public, pg_catalog`) e `open_dispatch_round` (system-only,
+  `search_path = public, extensions, pg_catalog` — PostGIS `ST_DWithin`/`ST_Distance`).
+  **Nenhuma tabela/coluna nova** — tudo já existe em 0005/0009/0010. Grants: `confirm_quote`
+  → `service_role`+`authenticated` (user-facing); `open_dispatch_round` → `service_role`
+  somente (`authenticated` sem EXECUTE, defesa em profundidade); `anon`: nada.
+- **`supabase/tests/test_vio10_dispatch.sql`** — 65 asserções (begin/rollback + SELECT
+  consolidado). `confirm_quote` (membro org; authz wrong-org/system/re-confirm/wrong_state/
+  expired); `open_dispatch_round` (rodada 1 raio 2000 → 2 candidatos; system-only;
+  eligibility radius 500 → 1; max_candidates=2 radius 5000 → 2; round_already_open; raio
+  progressivo round 2 radius 5000 → 3 candidatos round_number=2; wrong_state quoted/assigned/
+  notfound; 0 candidatos radius 50; invalid_param). Geometria no equador (lat=0) para
+  distâncias determinísticas (1° lng ≈ 111320m).
+
+### Decisões
+- **2 RPCs, 2 trust boundaries**: `confirm_quote` (user-scoped) confirma; `open_dispatch_round`
+  (system-only) abre cada rodada. Componível: orquestrador chama N vezes (raio progressivo).
+  Alinha "Backend decide, n8n orquestra".
+- **Parâmetros do caller (backend), sem `dispatch_config`**: `open_dispatch_round` recebe
+  raio/max_candidates/driver_offer/janela/max_location_age como params; tabela de config
+  adiada no MVP (espelha `create_quote`).
+- **`service_areas` por entregador ADIADO**: candidatos filtrados só por raio até a coleta
+  (`ST_DWithin`) + eligibility; sem junction driver↔area hoje.
+- **`offered` reservado**: não muta `current_availability_status` ao criar offers; driver
+  permanece `available`, pode receber offers de rodadas distintas; guard contra dupla offer
+  na mesma rodada = UK `(dispatch_round_id, driver_id)`.
+- **Cria rodada mesmo com 0 candidatos** (audit snapshot; orquestrador sabe expandir o raio).
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- **Reset from-scratch** via SQL + **replay 0001→0023 em ordem** — 23/23 limpo (sem
+  MIGFAIL).
+- Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `confirm_quote` `SECURITY DEFINER`
+  (execute service_role+authenticated), `open_dispatch_round` `SECURITY DEFINER`
+  system-only (execute só service_role, **authenticated sem EXECUTE**), `anon`=0 grants
+  em `public`.
+- `test_vio10_invariants.sql` → **13/13 PASS**; `test_vio10_rpcs.sql` → **48/48 PASS**;
+  `test_vio10_authz.sql` → **21/21 PASS**; `test_vio10_auth_lifecycle.sql` → **34/34
+  PASS**; `test_vio10_creation.sql` → **37/37 PASS**; `test_vio10_pricing.sql` → **62/62
+  PASS**; `test_vio10_dispatch.sql` → **65/65 PASS** — todas reais (não simulado).
+- Veredito **GO → Sessão 09** (bid engine + atribuição atômica — GATE).
+
+### Notas de validação
+- **pgTAP `finish()` neste dev emite via RAISE** (0 rows no resultset do endpoint); o
+  veredito `num_failed()=0` é a autoridade, e o último resultset de cada suíte pgTAP
+  confirma o nº de testes ("ok 13"/"ok 48"). O `finish()`-based `test_lines` no wrapper
+  `verdict.sql` é não-confiável aqui (sempre 0); `num_failed()` é o sinal real. Inalterado
+  desde a Sessão 05.
+- **PostGIS em schema `extensions`**: `open_dispatch_round` usa `st_dwithin`/`st_distance`
+  **não-qualificados** (não `public.st_*`) com `set search_path = public, extensions,
+  pg_catalog` — mesmo padrão de 0021. Funções PostGIS vivem em `extensions`, não em
+  `public`.
+
 ## [Sessão 07] — 2026-08-28 — Pricing engine determinístico (cotação, `draft → quoted`)
 
 ### Adicionado

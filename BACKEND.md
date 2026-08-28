@@ -208,6 +208,56 @@ Implementada em `supabase/migrations/0022_pricing_engine.sql` (1 RPC + ALTERs em
 create_quote to service_role`. `quoted_at`/`quote_created` são setados por
 `transition_delivery` (0016, já na matriz).
 
+### 4.4 RPCs de dispatch (Sessão 08, ADR-013)
+
+Implementadas em `supabase/migrations/0023_dispatch_engine.sql` (2 RPCs). **Nenhuma
+tabela/coluna nova** — tudo já existe em 0005/0009/0010. Modelo B: `SECURITY DEFINER`;
+`authenticated` **sem DML** em `dispatch_rounds`/`delivery_offers` — só EXECUTE em
+`confirm_quote` + SELECT sob RLS (0017); `anon`: nada.
+
+- **`confirm_quote(p_delivery_request_id, p_correlation_id default gen_random_uuid())`**
+  → `table(ok boolean, reason text)`. `SECURITY DEFINER`, `set search_path = public,
+  pg_catalog`. **User-scoped** (D1): system (null) **ou** `is_platform_admin()` **ou**
+  membro da org da corrida (`organization_memberships` join `delivery_requests`). Valida:
+  delivery existe e `status='quoted'`; `delivery_quotes` `status='pending'` não expirada
+  (a mais recente, `for update`) → `no_pending_quote`/`quote_expired`. **Transition-first**
+  (D6): chama `transition_delivery(id,'searching_driver', ator, metadata{quote_id},
+  p_correlation_id)` — `select for update` checa `quoted`, transita, seta
+  `dispatch_started_at`, emite `dispatch_started`; se `not ok` (race → `wrong_state`),
+  retorna **sem** marcar confirmed (sem órfã). Se ok, `update delivery_quotes set
+  status='confirmed', confirmed_at=now()` + emite `delivery_events` `quote_confirmed`.
+  Idempotência por estado: re-confirmar → `wrong_state`. Grants: `service_role` +
+  `authenticated` (user-facing); `anon`: nada. Ator (D7): system=`'system'`,
+  admin=`'admin'`, membro=`'business'`.
+- **`open_dispatch_round(p_delivery_request_id, p_search_radius_m integer,
+  p_max_candidates integer, p_driver_offer_cents bigint, p_response_window_seconds
+  integer, p_max_location_age_seconds integer default 300, p_correlation_id uuid default
+  gen_random_uuid())`** → `table(ok boolean, reason text, round_id uuid,
+  candidate_count integer)`. `SECURITY DEFINER`, `set search_path = public, extensions,
+  pg_catalog` (PostGIS). **System-only** (D2, segundo após `create_quote`):
+  `auth.uid() IS NOT NULL` → `(false,'not_authorized',null,0)`. Grants: `service_role`
+  **somente** (`authenticated` sem EXECUTE — defesa em profundidade); `anon`: nada. Trust
+  boundary: insumos de dispatch (raio/candidatos/oferta/janela) vêm do backend, não do
+  business. Valida: `status='searching_driver'` (senão `wrong_state`); params > 0 (senão
+  `invalid_param`); sem rodada aberta (senão `round_already_open`). Cria `dispatch_round`
+  (round_number monotônico, `config_snapshot`, `expires_at=now()+window`) + busca
+  candidatos (D3 eligibility: `active`+`available`+veículo compatível+sem assignment
+  ativa+localização fresca+`ST_DWithin` no raio; ordenação `ST_Distance` ASC, `LIMIT
+  max_candidates`) e cria `delivery_offers` (uma por candidato, `status='pending'`,
+  `driver_offer_cents`, `expires_at=round.expires_at`; UK `(round,driver)` protege dupla).
+  Emite `round_opened` + `offer_created` por offer (ator `'system'`). **Cria a rodada
+  mesmo com 0 candidatos** (audit snapshot; orquestrador expande o raio). Tudo atômico
+  (rollback em falha de constraint — sem rodada órfã). Raio progressivo (D5) = orquestrador
+  chama N vezes; fechar rodada/scoring/`claim_delivery` é **Sessão 09-10**.
+
+**Sem novos grants de DML a `authenticated`; sem tabela nova** (D8): `dispatch_rounds`/
+`delivery_offers` já têm RLS SELECT (0017, via `can_view_delivery_request`) +
+`service_role` DML (0015). Único grant system-only novo: `execute on open_dispatch_round
+to service_role`. `dispatch_started_at`/`dispatch_started` são setados por
+`transition_delivery` (0016, já na matriz). Busca por PostGIS (`ST_DWithin`/`ST_Distance`)
+é **filtro de candidatos** (proximidade operacional) — distinto de pricing, onde haversine
+é proibido para cobrança.
+
 ## 5. Idempotência
 
 - Endpoints mutantes aceitam cabeçalho `Idempotency-Key`.

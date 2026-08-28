@@ -23,6 +23,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-010 | Ciclo de vida de identidade e autenticação (MVP) | Aprovado (Sessão 05) |
 | ADR-011 | Criação da corrida + gestão de entidades (empresas/veículos/entregadores) | Aprovado (Sessão 06) |
 | ADR-012 | Pricing engine determinístico (cotação, `draft → quoted`) | Aprovado (Sessão 07) |
+| ADR-013 | Dispatch engine (busca de candidatos + raio progressivo, `quoted → searching_driver`) | Aprovado (Sessão 08) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -125,6 +126,52 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 08 — Dispatch engine (busca de candidatos + raio progressivo, ADR-013)
+
+- **2 RPCs, 2 trust boundaries** (ADR-013 D1/D2): `confirm_quote` (user-scoped,
+  membro da org/operator/admin/system) confirma a cotação; `open_dispatch_round`
+  (system-only, segundo system-only após `create_quote`) abre cada rodada. Componível:
+  o orquestrador chama `open_dispatch_round` N vezes (raio progressivo). Alinha a "Backend
+  decide, n8n orquestra".
+- **`confirm_quote` user-scoped** (D1): authz system/`is_platform_admin()`/membro da org;
+  valida `quoted` + quote `pending` não expirada; **transition-first** `quoted→
+  searching_driver` (emite `dispatch_started`, seta `dispatch_started_at`); se ok, marca
+  quote `confirmed`+`confirmed_at`, emite `quote_confirmed`. Se a transição falhar, retorna
+  sem marcar (sem órfã). Idempotência por estado: re-confirmar → `wrong_state`. Grants:
+  `service_role` + `authenticated` (user-facing); `anon`: nada.
+- **`open_dispatch_round` system-only** (D2): `auth.uid() IS NOT NULL` → `not_authorized`.
+  Trust boundary: raio/candidatos/oferta são insumos do orquestrador (backend), não do
+  business — um business passando `p_search_radius_m`/`p_driver_offer_cents` forjaria a
+  busca/oferta. Grants: `service_role` **somente** (`authenticated` sem EXECUTE — defesa em
+  profundidade); `anon`: nada. Espelha `create_quote`.
+- **Parâmetros do caller (backend), sem tabela de config** (D2/D5): `open_dispatch_round`
+  recebe raio/max_candidates/driver_offer/janela/max_location_age como params do backend
+  (que lê config própria). `dispatch_config` table **adiada** no MVP. Raio progressivo é
+  **orquestrado** (D5): o RPC abre uma rodada por chamada; a sequência crescente de raios e
+  o limite de rodadas/raio máximo são do orquestrador (Sessões 13-14); `round_number`
+  monotônico por corrida; guard `round_already_open`.
+- **Eligibility MVP** (D3): `active` + `available` + `current_vehicle_id` compatível
+  (`vehicle_type = vehicle_required`) + sem assignment ativa + localização fresca
+  (`captured_at > now() - max_age`) + `ST_DWithin` no raio (geography, metros — proximidade
+  operacional, **não** cobrança; distinto de pricing). Ordenação `ST_Distance` ASC,
+  `LIMIT max_candidates`. **Filtro `service_areas` por entregador ADIADO** (sem junction
+  driver↔area; raio até a coleta é a única restrição espacial). **Capacidade/peso/dims
+  ADIADO** (só `vehicle_type`; `weight_g`/dims no scoring futuro). **`offered` reservado**:
+  não muta `current_availability_status` ao criar offers; driver permanece `available`,
+  pode receber offers de rodadas distintas; guard contra dupla offer na mesma rodada é o
+  UK `(dispatch_round_id, driver_id)`.
+- **Atomicidade** (D4/D6): `open_dispatch_round` cria `dispatch_round` + todas as offers
+  numa transação — se qualquer offer insert falhar, rollback (sem rodada órfã). Cria a
+  rodada **mesmo com 0 candidatos** (audit snapshot; orquestrador expande o raio). Emite
+  `round_opened` + `offer_created` (ator `'system'`). Sem `idempotency_key`/
+  `external_reference` (idempotência por estado, ADR-012 D8).
+- **Ator via `auth.uid()`** (D7): `confirm_quote` → system=`'system'`, admin=`'admin'`,
+  membro=`'business'`; `open_dispatch_round` → sempre `'system'`. Nunca de param.
+- **Sem novos grants de DML a `authenticated`; sem tabela nova** (D8): `dispatch_rounds`/
+  `delivery_offers` já têm RLS SELECT (0017) + `service_role` DML (0015). `authenticated`
+  mantém SELECT sob RLS + EXECUTE em `confirm_quote`. Único grant system-only novo:
+  `execute on open_dispatch_round to service_role`. **Nenhuma tabela/coluna nova.**
 
 ### Sessão 07 — Pricing engine determinístico (ADR-012)
 

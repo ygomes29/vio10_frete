@@ -71,17 +71,21 @@ Regras:
 4. **Promoção proibida**: uma ação iniciada por usuário roda user-scoped. O backend não
    a "promove" a system-scoped para contornar RLS. Se o usuário não teria direito via
    RLS, o backend também não concede.
-5. **RPC system-only (`create_quote`, Sessão 07, ADR-012 D1)**: primeira RPC que **não
-   aceita caller autenticado de forma alguma** — `auth.uid() IS NOT NULL` →
-   `not_authorized`. `revoke all from public` + `grant execute to service_role`
-   **somente**: `authenticated` **nem EXECUTE** recebe (defesa em profundidade —
-   bloqueio no nível de privilégio antes da checagem interna de `auth.uid()`); `anon`:
-   nada. **Trust boundary:** os insumos de pricing (distância/duração) são do provider
-   de rota (plataforma, Sessão 20), não do business — um business passando
-   `p_distance_meters` forjaria distância pequena → preço baixo. O dashboard "solicitar
-   cotação" chama um Route Handler do backend, que chama `create_quote` system-scoped
-   (Sessão 18). Distinto de `create_delivery_request` (aceita membro de org): os
-   endereços da corrida são do business; a distância é da plataforma.
+5. **RPCs system-only** (`create_quote` Sessão 07 ADR-012 D1; `open_dispatch_round`
+   Sessão 08 ADR-013 D2): RPCs que **não aceitam caller autenticado de forma alguma** —
+   `auth.uid() IS NOT NULL` → `not_authorized`. `revoke all from public` + `grant execute
+   to service_role` **somente**: `authenticated` **nem EXECUTE** recebe (defesa em
+   profundidade — bloqueio no nível de privilégio antes da checagem interna de
+   `auth.uid()`); `anon`: nada. **Trust boundary dos insumos de pricing** (`create_quote`):
+   distância/duração são do provider de rota (plataforma, Sessão 20), não do business —
+   um business passando `p_distance_meters` forjaria distância pequena → preço baixo.
+   **Trust boundary dos insumos de dispatch** (`open_dispatch_round`): raio/max_candidates/
+   driver_offer/janela são do orquestrador (backend), não do business — um business
+   passando `p_search_radius_m`/`p_driver_offer_cents` forjaria a busca/oferta. O dashboard
+   "solicitar cotação"/"abrir despacho" chama um Route Handler do backend, que chama a RPC
+   system-scoped (Sessão 18). Distinto de `create_delivery_request`/`confirm_quote`
+   (aceitam membro de org): os endereços da corrida são do business; a distância e os
+   insumos de dispatch são da plataforma.
 
 ### Auth de usuários — identidade, convite e atribuição de papel (Sessão 05, ADR-010)
 
@@ -139,6 +143,8 @@ tabelas; a única mutação user-facing é a RPC, que checa `auth.uid()` interna
 | `update_driver_status` | `is_super_or_admin()` apenas | **negado** |
 | `create_delivery_request` | membro da org (`organization_memberships`) **ou** `is_platform_admin()` (admin/operator) | **permitido** (api/integration/whatsapp) |
 | `create_quote` | **negado** (system-only — `auth.uid() IS NOT NULL` → `not_authorized`; `authenticated` sem EXECUTE) | **permitido** (backend cota `draft→quoted`; insumos de rota da plataforma) |
+| `confirm_quote` | membro da org **ou** `is_platform_admin()` (admin/operator) | **permitido** (backend confirma `quoted→searching_driver`; valida quote pendente não expirada) |
+| `open_dispatch_round` | **negado** (system-only — `auth.uid() IS NOT NULL` → `not_authorized`; `authenticated` sem EXECUTE) | **permitido** (backend abre rodada de dispatch; insumos de raio/oferta do orquestrador) |
 
 Notas:
 - **`create_organization` = super/admin apenas**: criar tenant é ato de plataforma. O
@@ -163,6 +169,34 @@ Notas:
 - **Ator capturado por `auth.uid()`** (D6): system → `'system'`; platform admin →
   `'admin'`; membro de org → `'business'`. O `actor_type` nunca vem de parâmetro
   (alinha com `transition_delivery`).
+
+### Matriz de autoridade de dispatch (Sessão 08, ADR-013)
+
+Estende a matriz para o **motor de despacho**. `confirm_quote` é user-facing (membro da
+org/operator/admin confirmam a cotação); `open_dispatch_round` é system-only (o
+orquestrador/backend abre rodadas — insumos de raio/oferta não vêm do business). Ambas via
+RPC `SECURITY DEFINER` (Modelo B); `authenticated` **sem DML** em `dispatch_rounds`/
+`delivery_offers` — só EXECUTE em `confirm_quote` + SELECT sob RLS (0017); `anon`: nada.
+
+- **`confirm_quote` aceita user path**: business_owner/business_user (membro da org),
+  operator/admin (`is_platform_admin()`) e system (backend). **Transition-first**
+  (`quoted→searching_driver` via `transition_delivery`) **antes** de marcar a quote
+  `confirmed` — se a transição falhar (race → `wrong_state`), retorna sem marcar (sem
+  quote confirmed órfã). Idempotência por estado: re-confirmar → `wrong_state`.
+- **`open_dispatch_round` system-only, segundo após `create_quote`**: `authenticated`
+  **nem EXECUTE** recebe (defesa em profundidade). **Trust boundary de dispatch:** raio,
+  max_candidates, `driver_offer_cents`, janela, `max_location_age_seconds` são insumos do
+  orquestrador (backend), não do business — um business passando esses params forjaria a
+  busca/oferta. O backend lê config própria (tabela `dispatch_config` adiada). Raio
+  progressivo = orquestrador chama N vezes com raios crescentes (D5); `round_number`
+  monotônico; guard `round_already_open` (fechar rodada é Sessão 09). Cria a rodada
+  **mesmo com 0 candidatos** (audit snapshot). Eligibility MVP (D3): `active`+`available`
+  +veículo compatível+sem assignment ativa+localização fresca+`ST_DWithin` no raio
+  (proximidade operacional, não cobrança). **Não muta `current_availability_status`**
+  (`offered` reservado); guard contra dupla offer na rodada = UK `(round_id, driver_id)`.
+- **Sem novos grants de DML a `authenticated`; sem tabela nova** (D8): `dispatch_rounds`/
+  `delivery_offers` já têm RLS SELECT (0017) + `service_role` DML (0015). Único grant
+  system-only novo: `execute on open_dispatch_round to service_role`.
 
 ## Idempotência
 
