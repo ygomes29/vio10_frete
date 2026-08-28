@@ -72,24 +72,29 @@ Regras:
    a "promove" a system-scoped para contornar RLS. Se o usuário não teria direito via
    RLS, o backend também não concede.
 5. **RPCs system-only** (`create_quote` Sessão 07 ADR-012 D1; `open_dispatch_round`
-   Sessão 08 ADR-013 D2; `select_winner_and_claim` Sessão 09 ADR-014 D1): RPCs que **não
-   aceitam caller autenticado de forma alguma** — `auth.uid() IS NOT NULL` →
-   `not_authorized`. `revoke all from public` + `grant execute to service_role`
-   **somente**: `authenticated` **nem EXECUTE** recebe (defesa em profundidade — bloqueio
-   no nível de privilégio antes da checagem interna de `auth.uid()`); `anon`: nada.
-   **Trust boundary dos insumos de pricing** (`create_quote`): distância/duração são do
-   provider de rota (plataforma, Sessão 20), não do business — um business passando
-   `p_distance_meters` forjaria distância pequena → preço baixo. **Trust boundary dos
-   insumos de dispatch** (`open_dispatch_round`): raio/max_candidates/driver_offer/janela
-   são do orquestrador (backend), não do business — um business passando
-   `p_search_radius_m`/`p_driver_offer_cents` forjaria a busca/oferta. **Trust boundary dos
-   pesos de scoring** (`select_winner_and_claim`): os pesos de scoring vêm do backend
-   (config do orquestrador), não do business — um business passando `p_weight_price`/
-   `p_weight_distance` forjaria o vencedor. O dashboard "solicitar cotação"/"abrir
-   despacho"/"fechar rodada" chama um Route Handler do backend, que chama a RPC
-   system-scoped (Sessão 18). Distinto de `create_delivery_request`/`confirm_quote`
-   (aceitam membro de org): os endereços da corrida são do business; a distância, os
-   insumos de dispatch e os pesos de scoring são da plataforma.
+   Sessão 08 ADR-013 D2; `select_winner_and_claim` Sessão 09 ADR-014 D1; `confirm_delivery`
+   Sessão 11 ADR-016 D4): RPCs que **não aceitam caller autenticado de forma alguma** —
+   `auth.uid() IS NOT NULL` → `not_authorized`. `revoke all from public` + `grant execute
+   to service_role` **somente**: `authenticated` **nem EXECUTE** recebe (defesa em
+   profundidade — bloqueio no nível de privilégio antes da checagem interna de
+   `auth.uid()`); `anon`: nada. **Trust boundary dos insumos de pricing** (`create_quote`):
+   distância/duração são do provider de rota (plataforma, Sessão 20), não do business — um
+   business passando `p_distance_meters` forjaria distância pequena → preço baixo. **Trust
+   boundary dos insumos de dispatch** (`open_dispatch_round`): raio/max_candidates/
+   driver_offer/janela são do orquestrador (backend), não do business — um business
+   passando `p_search_radius_m`/`p_driver_offer_cents` forjaria a busca/oferta. **Trust
+   boundary dos pesos de scoring** (`select_winner_and_claim`): os pesos de scoring vêm do
+   backend (config do orquestrador), não do business — um business passando
+   `p_weight_price`/`p_weight_distance` forjaria o vencedor. **Trust boundary do POD**
+   (`confirm_delivery`): a confirmação da entrega é ato do sistema (valida o POD + transita
+   `delivered`), não do driver — o driver submete a evidência (`submit_proof_of_delivery`,
+   driver-scoped); o sistema confirma. Em produção, **n8n** chama `confirm_delivery`
+   (webhook sobre `pod_submitted`); pré-n8n, o backend/service layer. O dashboard
+   "solicitar cotação"/"abrir despacho"/"fechar rodada"/"confirmar entrega" chama um Route
+   Handler do backend, que chama a RPC system-scoped (Sessão 18). Distinto de
+   `create_delivery_request`/`confirm_quote`/`submit_proof_of_delivery` (aceitam membro de
+   org/driver): os endereços da corrida são do business; a distância, os insumos de
+   dispatch, os pesos de scoring e a confirmação de entrega são da plataforma.
 
 ### Auth de usuários — identidade, convite e atribuição de papel (Sessão 05, ADR-010)
 
@@ -230,6 +235,59 @@ fecha a rodada, pontua e atribui; os pesos de scoring não vêm do business. Via
   `execute on select_winner_and_claim to service_role`. `dispatch_rounds`/`delivery_offers`/
   `bids` já têm RLS SELECT (0017) + `service_role` DML (0015); `claim_delivery`/
   `transition_delivery` já concedidos a `service_role` (0016).
+
+### Matriz de autoridade do ciclo + POD gate (Sessão 11, ADR-016)
+
+Estende a matriz para o **ciclo pós-`assigned`** e a **proof of delivery**. A máquina de
+estados `transition_delivery` é refinada (assinatura inalterada) com a matriz
+**(ator × transição)** (D1): o ator é resolvido de `auth.uid()` numa classe de papel
+(`system`/`admin`/`driver`/`business`); a matriz estrutural M (from→to) é checada primeiro
+(`invalid_transition`), depois a matriz de papel R (`not_authorized`). Via RPC
+`SECURITY DEFINER` (Modelo B); `authenticated` **sem DML** em `proof_of_delivery` — só
+EXECUTE em `transition_delivery`/`submit_proof_of_delivery` + SELECT sob RLS (0017);
+`anon`: nada.
+
+- **`transition_delivery` — matriz ator × transição (D1)**: **admin** perde as system-only
+  `{draft→quoted, searching_driver→assigned, searching_driver→expired, in_transit→delivered}`
+  (usa a RPC dedicada ou é automatizado); pode avançar micro-estados do driver (override
+  operacional), cancelar, falhar, reatribuir. **driver** só avanço forward-only
+  `{assigned→driver_to_pickup, driver_to_pickup→at_pickup, at_pickup→picked_up,
+  picked_up→in_transit}`; **não** pode `delivered`/reatribuir/cancelar/falhar. **business**
+  só `{draft→cancelled, quoted→cancelled, quoted→searching_driver, searching_driver→
+  cancelled}`; não cancela pós-atribuição, não avança driver. **`draft→cancelled`**
+  adicionado a M (business pode cancelar draft). Matriz completa em
+  `docs/DELIVERY_LIFECYCLE.md`.
+- **Limite de reatribuição (D2)**: em `assigned`/`driver_to_pickup`/`in_transit`/`at_pickup →
+  searching_driver`, lê `p_metadata->>'max_reassignments'`; se `reassignment_count >= max`
+  → `reassignment_limit_reached` **sem mutar** (orquestrador emite `→failed`). Sem `max` =
+  ilimitado (back-compat). Sem tabela de config no MVP — param do caller.
+- **`cancelled_reason`/`failed_reason` do metadata (D3)**: ao transitar para `cancelled`/
+  `failed`, seta a coluna de `p_metadata->>'reason'` (colunas existiam em 0007 mas nunca
+  eram escritas — correção).
+- **POD two-phase (D4) — submeter ≠ entregar** (análogo a ACEITAR ≠ GANHAR, ADR-006): por
+  causa da sutileza de `auth.uid()` em cadeia DEFINER (lê o JWT GUC, **não muda** com
+  SECURITY DEFINER), um RPC driver-scoped não pode disparar uma transição system-only
+  internamente. Logo:
+  - **`submit_proof_of_delivery`** (driver-scoped: driver com assignment ativa, ou system):
+    valida completude (delivery: `storage_path`/`otp_code` + `receiver_name`; pickup: ao
+    menos um de `storage_path`/`otp_code`/`notes`) + estado; insere em `proof_of_delivery`
+    (unique `(delivery_request_id, pod_type)` → `pod_already_submitted`); emite
+    `pod_submitted`; **não transita**. Grants: `service_role` + `authenticated` (user-facing).
+  - **`confirm_delivery`** (**system-only**, quarto após `create_quote`/`open_dispatch_round`/
+    `select_winner_and_claim`): `authenticated` **nem EXECUTE** recebe (defesa em
+    profundidade). Valida POD `pod_type='delivery'` existe (senão `pod_required`) e chama
+    `transition_delivery('delivered')` que **re-valida** o POD gate (defense in depth).
+    Grants: `service_role` somente.
+- **POD gate (D5)**: dentro de `transition_delivery`, `in_transit → delivered` exige POD
+  `pod_type='delivery'` — impede **qualquer** path (inclusive system direto sem POD) de
+  entregar sem prova. `confirm_delivery` pré-valida (D4) e o gate re-valida — defense in
+  depth. "O frontend não marca `delivered`; o backend valida o POD e dispara a transição"
+  (regra mestra) — garantido no banco.
+- **Sem tabela nova; sem novos grants de DML a `authenticated`** (D8): INSERT em
+  `proof_of_delivery` só via DEFINER (RLS INSERT/UPDATE permanece default-deny — sem policy
+  nova). Único grant novo: `execute on confirm_delivery to service_role`. **Split 0025/0026**
+  (D9): enum `pod_submitted` + unique em 0025 (sem funções), RPCs em 0026 — evita o gotcha
+  `ALTER TYPE ... ADD VALUE` in-tx.
 
 ### Concorrência real — GATE de produção (Sessão 10, ADR-015)
 

@@ -61,8 +61,15 @@ valida). `authenticated` não recebe DML de domínio — só EXECUTE nas RPCs + 
   ACCEPT/COUNTER_BID/DECLINE idempotentemente. **Não atribui.** ACEITAR =
   `bid_amount_cents = driver_offer_cents`. Uma resposta válida por (offer, driver).
 - `transition_delivery(p_delivery_request_id, p_to_status, p_actor_type,
-  p_actor_id, p_metadata, p_correlation_id)` — máquina de estados central com matriz
-  de transições; supersede assignment anterior em reatribuição; insere `delivery_event`.
+  p_actor_id, p_metadata, p_correlation_id)` — máquina de estados central. **Refinada
+  na Sessão 11 (ADR-016, 0026)** com matriz de authz por (ator × transição): resolve a
+  classe de papel (system/admin/driver/business) de `auth.uid()` → matriz estrutural M
+  (from→to, `invalid_transition`) → matriz de papel R (`not_authorized`); limite de
+  reatribuição via `p_metadata->>'max_reassignments'` (`reassignment_limit_reached` sem
+  mutar); POD gate em `delivered` (`pod_required` sem POD delivery); `cancelled_reason`/
+  `failed_reason` do `metadata->>'reason'`; `draft→cancelled` em M; supersede assignment
+  ativa em reatribuição + `reassignment_count++`; insere `delivery_event`. Assinatura
+  inalterada (Sessão 03/04).
 - `set_driver_availability(p_driver_id, p_status, p_reason)` — atualiza
   `drivers.current_availability_status` + append em `driver_availability` (log).
 
@@ -321,6 +328,71 @@ novo = `execute on select_winner_and_claim to service_role`. `dispatch_rounds`/
 assignment ativa, exatamente 1 won, delivery `assigned`, round `closed` sustentados em
 todas as corridas. Lock-ordering `claim_delivery`↔SWAC observado (deadlock latente
 40P01, não-hazard vivo — claim só roda dentro de SWAC); hardening adiado.
+
+### 4.6 RPCs do ciclo completo pós-`assigned` + POD gate (Sessão 11, ADR-016)
+
+Implementadas em `supabase/migrations/0025_state_machine_pod_prep.sql` (schema prep:
+enum `pod_submitted` + unique `(delivery_request_id, pod_type)` — sem funções, evita o
+gotcha `ALTER TYPE ... ADD VALUE` in-tx) e `0026_state_machine_pod_rpcs.sql` (3 RPCs).
+**Nenhuma tabela/coluna nova.** Modelo B: `SECURITY DEFINER`; `authenticated` **sem DML**
+em `proof_of_delivery` — só EXECUTE nas RPCs user-facing + SELECT sob RLS (0017); `anon`:
+nada.
+
+- **`transition_delivery(...)`** (refinada, assinatura inalterada — D1/D2/D3/D5):
+  `set search_path = public, pg_catalog`. Resolve a classe de papel de `auth.uid()`:
+  `system` (null), `admin` (`user_platform_roles` in super_admin/admin/operator), `driver`
+  (driver com assignment ativa na corrida), `business` (membro da org). Matriz estrutural
+  M (from→to) checada primeiro (`invalid_transition`); depois matriz de papel R
+  (`not_authorized`). **admin** perde as system-only `{draft→quoted, searching_driver→
+  assigned, searching_driver→expired, in_transit→delivered}`; **driver** só avanço
+  forward-only `{assigned→driver_to_pickup, driver_to_pickup→at_pickup, at_pickup→
+  picked_up, picked_up→in_transit}`; **business** só `{draft→cancelled, quoted→cancelled,
+  quoted→searching_driver, searching_driver→cancelled}`. **`draft→cancelled` adicionado
+  a M.** Limite de reatribuição (D2): em `assigned`/`driver_to_pickup`/`in_transit`/
+  `at_pickup → searching_driver`, lê `p_metadata->>'max_reassignments'`; se
+  `reassignment_count >= max` → `(false,'reassignment_limit_reached')` **sem mutar**; sem
+  `max` = ilimitado (back-compat). Supersede assignment ativa (`ended_reason='reassigned'`)
+  + `reassignment_count++`. POD gate (D5): `in_transit→delivered` exige POD
+  `pod_type='delivery'` (senão `pod_required`). `cancelled_reason`/`failed_reason` (D3) de
+  `p_metadata->>'reason'`. Evento + timestamps (existente). Grants inalterados:
+  `service_role` + `authenticated`. **Callers internos preservados:** `create_quote`
+  (system→draft→quoted ✓), `confirm_quote` (business/admin→quoted→searching_driver ✓).
+  `claim_delivery`/SWAC não chamam `transition_delivery` — GATE Sessão 10 íntegro.
+- **`submit_proof_of_delivery(p_delivery_request_id, p_pod_type, p_storage_path,
+  p_otp_code, p_receiver_name, p_location_lat double precision, p_location_lng double
+  precision, p_notes, p_correlation_id)`** → `table(ok boolean, reason text, pod_id uuid)`.
+  `SECURITY DEFINER`, `set search_path = public, extensions, pg_catalog`. **Driver-scoped
+  ou system** (D4): auth.uid null → system; não-null → driver com assignment ativa na
+  corrida (senão `not_authorized`). Valida completude (D6): delivery exige
+  `(storage_path or otp_code)` **e** `receiver_name`; pickup exige ao menos um de
+  `storage_path`/`otp_code`/`notes` → senão `invalid_pod`. Estado: delivery exige
+  `in_transit`; pickup exige `driver_to_pickup`/`at_pickup`/`picked_up`/`in_transit` →
+  senão `wrong_state`. lat/lng double precision → geography montado server-side
+  (`st_setsrid(st_makepoint(lng,lat),4326)::geography` — padrão 0021, não expõe geography
+  na assinatura). Insere POD (`unique_violation` → `pod_already_submitted`). Emite
+  `pod_submitted` (metadata `{pod_id, pod_type}`). **Não transita** (delivered é via
+  `confirm_delivery`). Grants: `service_role` + `authenticated` (user-facing); `anon`:
+  nada.
+- **`confirm_delivery(p_delivery_request_id, p_correlation_id default gen_random_uuid())`**
+  → `table(ok boolean, reason text, pod_id uuid)`. `SECURITY DEFINER`,
+  `set search_path = public, pg_catalog`. **System-only** (D4/D5, quarto system-only após
+  `create_quote`/`open_dispatch_round`/`select_winner_and_claim`): `auth.uid() is not null`
+  → `(false,'not_authorized',null)`. Valida POD `pod_type='delivery'` existe (senão
+  `pod_required`). Chama `transition_delivery(id,'delivered','system',null,
+  jsonb_build_object('pod_id',v_pod_id), p_correlation_id) as t` (alias `t` — lição Sessão
+  07) que **re-valida** o POD gate (defense in depth) e transita. Retorna
+  `(true,'delivered',v_pod_id)` ou propaga o reason. Grants: `service_role` **somente**
+  (`authenticated` sem EXECUTE — defesa em profundidade); `anon`: nada. **Submeter POD ≠
+  entregue** — o driver fornece a evidência; o sistema confirma. Em produção, **n8n** chama
+  `confirm_delivery` (webhook sobre `pod_submitted`); pré-n8n, o backend/service layer.
+
+**Sem novos grants de DML a `authenticated`; sem tabela/coluna nova** (D8): INSERT em
+`proof_of_delivery` só via DEFINER (RLS INSERT/UPDATE permanece default-deny — sem policy
+nova). Único grant novo: `execute on confirm_delivery to service_role`. `transition_delivery`
+grants inalterados; `submit_proof_of_delivery` segue o padrão user-facing. **Split
+0025/0026** (D9): enum `pod_submitted` + unique em 0025 (sem funções), RPCs em 0026 — evita
+o gotcha `ALTER TYPE ... ADD VALUE` in-tx (valor não referenciável na mesma transação).
+Confirmado: `'pod_submitted'` referenciável em 0026 no replay 26/26.
 
 ## 5. Idempotência
 

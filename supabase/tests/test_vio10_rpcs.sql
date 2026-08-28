@@ -338,6 +338,10 @@ select is((select ok from trans_res), true, 'TR6: at_pickup->picked_up ok');
 delete from trans_res;
 insert into trans_res select * from public.transition_delivery((select v::uuid from rpc_ids where k='dr_trans'),'in_transit');
 select is((select ok from trans_res), true, 'TR7: picked_up->in_transit ok');
+-- Sessão 11 (ADR-016 D5): in_transit->delivered agora exige POD pod_type='delivery'.
+-- Teste roda como owner; insere POD direto para satisfazer o gate.
+insert into public.proof_of_delivery(delivery_request_id, pod_type, storage_path, receiver_name)
+  values((select v::uuid from rpc_ids where k='dr_trans'), 'delivery', 'pod/trans.jpg', 'Receiver');
 delete from trans_res;
 insert into trans_res select * from public.transition_delivery((select v::uuid from rpc_ids where k='dr_trans'),'delivered');
 select is((select ok from trans_res), true, 'TR8: in_transit->delivered ok');

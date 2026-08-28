@@ -210,8 +210,44 @@
     permanece deferido (Sessão 06).
   - **Veredito**: **GATE PASS** → GO para Sessão 11 (ciclo completo: máquina de estados
     + proof of delivery).
-- **Próxima**: Sessão 11 — ciclo completo (máquina de estados pós-`assigned` + proof of
-  delivery).
+- **Sessão 11 (atual)**: Ciclo completo (máquina de estados pós-`assigned` + POD gate) —
+  **concluída — PASS**.
+  - **26 migrations** em `supabase/migrations/` (0001-0024 + **0025** schema prep +
+    **0026** 3 RPCs). **Nenhuma tabela/coluna nova**; enum `pod_submitted` + unique
+    `(delivery_request_id, pod_type)` em `proof_of_delivery`.
+  - **ADR-016**: ciclo completo pós-`assigned` + POD gate. D1 matriz de authz por
+    (ator × transição) dentro de `transition_delivery` (system/admin/driver/business —
+    M estrutural primeiro, depois R de papel; admin perde system-only, driver forward-only,
+    business só pré-atribuição; `draft→cancelled` adicionado a M); D2 limite de reatribuição
+    via `p_metadata->>'max_reassignments'` (sem teto = ilimitado, back-compat); D3
+    `cancelled_reason`/`failed_reason` do metadata (colunas existiam mas nunca escritas);
+    D4 POD two-phase `submit_proof_of_delivery` (driver-scoped) + `confirm_delivery`
+    (system-only) — "Submeter POD ≠ entregue"; D5 POD gate em `in_transit→delivered`
+    (defense in depth); D6 completude do POD no MVP; D7 ator via `auth.uid()` + evento
+    `pod_submitted`; D8 sem tabela nova; D9 split 0025/0026 (gotcha enum-add-value in-tx).
+  - **0025** — schema prep (sem funções): enum `pod_submitted` + unique
+    `(delivery_request_id, pod_type)`.
+  - **0026** — 3 RPCs DEFINER: `transition_delivery` **refinada** (assinatura inalterada),
+    `submit_proof_of_delivery` (driver-scoped/system; valida + insere + emite `pod_submitted`;
+    **não transita**), `confirm_delivery` (**system-only**; valida POD + chama
+    `transition_delivery('delivered')` que re-valida o gate). Grants: transition/submit →
+    service_role+authenticated; confirm → service_role somente (authenticated sem EXECUTE).
+  - **Callers internos preservados**: `create_quote`/`confirm_quote` não quebrados;
+    `claim_delivery`/SWAC não chamam `transition_delivery` — GATE Sessão 10 íntegro.
+  - **Hardening — reset/replay from-scratch**: `drop schema public cascade` +
+    `delete from auth.users` + replay **0001→0026 em ordem** → 26/26 limpo. Inventário: 26
+    tabelas (nenhuma nova), RLS 26/26, POD unique, enum `pod_submitted`, `confirm_delivery`
+    DEFINER system-only (execute só service_role), `anon`=0 em `public`.
+  - **Validado real** (dev `rtoyfiqngyicqtuzwfhz`): invariants **13/13**, rpcs **48/48**,
+    authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**,
+    dispatch **65/65**, bid **61/61**, lifecycle (novo) **65/65** — **9/9 suítes, 406
+    asserções, todas PASS (não simulado)**. Bug de teste corrigido (leak residual de JWT —
+    lição Sessão 06 reconfirmada: cada bloco autenticado reseta JWT para `'{}'` antes dos
+    helpers, seta o ator, reseta antes de system-only). `test_vio10_rpcs` TR8 ajustado
+    (POD gate).
+  - **Veredito**: GO para Sessão 12 (POD completo: foto/OTP/geolocation/recebedor).
+- **Próxima**: Sessão 12 — POD completo (foto em Storage, OTP ao recebedor via WhatsApp,
+  geolocation, verificação do recebedor, gating de pickup POD, auto-confirm orquestrado).
 
 ## Roadmap (20 fases / 29 sessões)
 

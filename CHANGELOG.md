@@ -2,6 +2,105 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 11] — 2026-08-28 — Ciclo completo (máquina de estados pós-`assigned` + POD gate)
+
+### Adicionado
+- **ADR-016** — ciclo completo pós-`assigned` + POD gate. D1 matriz de authz por
+  (ator × transição) dentro de `transition_delivery` (system/admin/driver/business —
+  M estrutural primeiro, depois R de papel); D2 limite de reatribuição via
+  `p_metadata->>'max_reassignments'` (sem teto = ilimitado, back-compat); D3
+  `cancelled_reason`/`failed_reason` capturados do metadata (colunas existiam mas nunca
+  eram escritas); D4 POD two-phase `submit_proof_of_delivery` (driver-scoped) +
+  `confirm_delivery` (system-only) — "Submeter POD ≠ entregue" (análogo a ACEITAR ≠
+  GANHAR); D5 POD gate em `in_transit→delivered` dentro de `transition_delivery`
+  (defense in depth — `confirm_delivery` pré-valida e o gate re-valida); D6 completude
+  do POD no MVP (delivery: storage/otp + receiver_name; pickup: storage/otp/notes) +
+  unique `(delivery_request_id, pod_type)` → `pod_already_submitted`; D7 ator via
+  `auth.uid()` + evento `pod_submitted`; D8 sem tabela nova (enum + constraint + 2 RPCs
+  + 1 RPC refinada); D9 split em 2 migrations (gotcha `ALTER TYPE ... ADD VALUE`
+  in-tx — 0025 enum+constraint, 0026 RPCs que referenciam `'pod_submitted'`).
+- **Migration 0025** — schema prep: `alter type delivery_event_type add value
+  'pod_submitted'` + `unique (delivery_request_id, pod_type)` em `proof_of_delivery`.
+  **Nenhuma função** (evita o gotcha in-tx do enum-add-value).
+- **Migration 0026** — 3 RPCs `SECURITY DEFINER`: `transition_delivery` **refinada**
+  (assinatura inalterada — matriz ator×transição, limite de reatribuição, POD gate,
+  cancelled/failed reason, `draft→cancelled` adicionado a M), `submit_proof_of_delivery`
+  (driver-scoped ou system; valida completude + estado; insere POD; emite `pod_submitted`;
+  **não transita**), `confirm_delivery` (**system-only** — `auth.uid() not null` →
+  `not_authorized`; valida POD delivery + chama `transition_delivery('delivered')` que
+  re-valida o gate; grant só `service_role`). Grants: `transition_delivery`/`submit_*`
+  → service_role + authenticated (user-facing); `confirm_delivery` → service_role somente
+  (authenticated sem EXECUTE — defesa em profundidade). **Nenhuma tabela/coluna nova.**
+- **`supabase/tests/test_vio10_lifecycle.sql`** — 65 asserções (begin/rollback + SELECT
+  consolidado). T1 happy path driver (assigned→in_transit + eventos + actor); T2 pulo de
+  estado (invalid_transition); T3 driver não entrega (not_authorized); T4 driver não
+  reatribui/cancela/falha; T5 business cancela pré-atribuição (draft/quoted/searching →
+  cancelled; assigned → not_authorized); T6 admin pós-atribuição (cancel/fail/reassign +
+  reassignment_count + no active); T7 system-only guard (admin bloqueado em
+  quote/assign/expire; system executa); T8 limite de reatribuição metadata max:1
+  (reassignment_limit_reached sem mutar, then failed); T9 reatribuição supersede
+  (assignment superseded + ended_reason=reassigned + count++); T10 submit POD driver
+  (submitted, sem transição, evento pod_submitted); T11 submit não-autorizado (driver
+  sem assignment); T12 submit inválido (invalid_pod); T13 submit duplicado
+  (pod_already_submitted); T14 submit wrong_state; T15 confirm system (delivered +
+  delivered_at + evento); T16 confirm sem POD (pod_required); T17 confirm system-only
+  (admin → not_authorized); T18 confirm wrong_state (picked_up → invalid_transition);
+  T19 POD gate direto (system sem POD → pod_required); T20 pickup POD (sem transição);
+  T21 cancel/fail reason de metadata; T22 draft→cancelled (business, nova transição em M).
+
+### Decisões
+- **Refinar `transition_delivery` (não criar N RPCs de domínio)**: a máquina de estados
+  permanece um ponto único auditável; o app do driver chama `transition_delivery` com o
+  status-alvo e a RPC autoriza por `auth.uid()`. Único acréscimo de RPC = POD (two-phase).
+  Mantém o padrão do projeto (toda transição crítica por função central transacional).
+- **POD two-phase (driver submete, sistema confirma)**: por causa da sutileza de
+  `auth.uid()` em cadeia DEFINER (lê o JWT GUC, **não muda** com SECURITY DEFINER), um RPC
+  driver-scoped não pode disparar uma transição system-only internamente. Logo o driver
+  submete a evidência (`submit_proof_of_delivery`) e o sistema confirma
+  (`confirm_delivery`, system-only). Espelha `create_quote`/`SWAC` (system-only,
+  trust boundary). Em produção, **n8n** chama `confirm_delivery` (webhook sobre
+  `pod_submitted`); pré-n8n, o backend/service layer chama.
+- **`draft→cancelled` adicionado à matriz M**: business pode cancelar draft (ausente
+  antes). Reatribuição tem teto configurável via metadata (sem tabela de config no MVP).
+- **Callers internos preservados**: `create_quote` (system→draft→quoted ✓),
+  `confirm_quote` (business/admin→quoted→searching_driver ✓) — matriz refinada não os
+  quebra. `claim_delivery`/`select_winner_and_claim` não chamam `transition_delivery`
+  — GATE da Sessão 10 permanece íntegro.
+
+### Validado (real, no dev `rtoyfiqngyicqtuzwfhz` — nunca produção)
+- **Reset from-scratch** via SQL + **replay 0001→0026 em ordem** — 26/26 limpo (sem
+  MIGFAIL). `'pod_submitted'` referenciável em 0026 (split 0025/0026 resolve o gotcha
+  in-tx do enum-add-value).
+- Inventário: 26 tabelas (nenhuma nova), RLS 26/26, `proof_of_delivery` unique
+  `(delivery_request_id, pod_type)`, enum `pod_submitted` presente, `transition_delivery`
+  refinada (grant service_role+authenticated), `submit_proof_of_delivery` DEFINER (execute
+  service_role+authenticated), `confirm_delivery` DEFINER **system-only** (execute só
+  service_role, authenticated sem EXECUTE), `anon`=0 em `public`.
+- `test_vio10_invariants.sql` → **13/13 PASS**; `test_vio10_rpcs.sql` → **48/48 PASS**;
+  `test_vio10_authz.sql` → **21/21 PASS**; `test_vio10_auth_lifecycle.sql` → **34/34
+  PASS**; `test_vio10_creation.sql` → **37/37 PASS**; `test_vio10_pricing.sql` → **62/62
+  PASS**; `test_vio10_dispatch.sql` → **65/65 PASS**; `test_vio10_bid.sql` → **61/61
+  PASS**; `test_vio10_lifecycle.sql` (novo) → **65/65 PASS** — todas reais (não simulado).
+  **9/9 suítes, 406 asserções, zero falhas, sem regressão.**
+- Veredito **GO → Sessão 12** (POD completo: foto/OTP/geolocation/recebedor).
+
+### Corrigido (durante a validação real)
+- **`test_vio10_rpcs.sql` TR8**: o POD gate novo (0026) faz `in_transit→delivered` exigir
+  POD; o teste original não inseria POD antes da transição. Ajustado para inserir POD
+  (owner path) antes de `transition_delivery('delivered')` — satisfaz o gate. 48/48 após.
+- **Bug de teste — leak residual de JWT (não bug de RPC)**: `set_config(
+  'request.jwt.claims',...,true)` é **is_local — persiste até o fim da TRANSAÇÃO, não do
+  bloco**. A 1ª versão do `test_vio10_lifecycle.sql` setava JWT=driver em T1 e nunca
+  resetava → T2's `mk_searching` rodava com `auth.uid()` = driver residual de T1 →
+  `create_delivery_request` retornava `not_authorized` (driver não é membro org) → id
+  null → `mk_assigned` null → `null value in column "dr_id"`. **Lição Sessão 06
+  reconfirmada:** cada bloco de teste autenticado deve resetar o JWT para `'{}'`
+  (system) **antes** dos helpers mk_*/create_*/confirm_quote (system path), depois setar
+  o ator antes das chamadas autenticadas, e resetar de volta a `'{}'` antes de chamadas
+  system-only dentro do mesmo bloco. Corrigido — 65/65 na 2ª execução. Diagnóstico
+  exigiu captura do reason via temp table (RAISE NOTICE não alcança o resultset do
+  endpoint — lição Sessão 03.5).
+
 ## [Sessão 02] — 2026-08-27 — Fundação documental
 
 ### Adicionado

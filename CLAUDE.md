@@ -218,7 +218,30 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   auth_lifecycle 34/34, creation 37/37, pricing 62/62, dispatch 65/65, bid 61/61 PASS
   (regressão). Bug de harness corrigido (poluição cross-run via longitude compartilhada →
   offset 1°/run; invariante núcleo nunca violado).
-- **Próxima**: Sessão 11 — ciclo completo (máquina de estados pós-`assigned` + proof of
-  delivery).
+- **Sessão 11 (concluída)**: Ciclo completo (máquina de estados pós-`assigned` + POD gate)
+  — **PASS**. 26 migrations (**0025** schema prep — enum `pod_submitted` + unique
+  `(delivery_request_id, pod_type)` em `proof_of_delivery`, sem funções; **0026** 3 RPCs
+  `SECURITY DEFINER`: `transition_delivery` **refinada** (assinatura inalterada — matriz
+  ator×transição D1, limite de reatribuição via metadata D2, cancelled/failed reason D3,
+  POD gate D5, `draft→cancelled` em M), `submit_proof_of_delivery` (driver-scoped/system;
+  valida + insere + emite `pod_submitted`; **não transita**), `confirm_delivery`
+  **system-only** (valida POD + chama `transition_delivery('delivered')` que re-valida o
+  gate). **Nenhuma tabela/coluna nova.** ADR-016 (D1 matriz ator×transição — system/admin/
+  driver/business, M estrutural primeiro depois R de papel; D2 limite via
+  `metadata.max_reassignments`; D3 reasons do metadata; D4 POD two-phase — "Submeter POD ≠
+  entregue" análogo a ACEITAR ≠ GANHAR; D5 POD gate defense in depth; D6 completude MVP; D7
+  ator via `auth.uid`; D8 sem tabela nova; D9 split 0025/0026 — gotcha `ALTER TYPE ... ADD
+  VALUE` in-tx). Callers internos preservados (`create_quote`/`confirm_quote`); GATE Sessão
+  10 íntegro. Grants: transition/submit → service_role+authenticated; confirm →
+  service_role somente (authenticated sem EXECUTE). Hardening: reset via SQL + replay
+  0001→0026 limpo (26/26); invariants 13/13, rpcs 48/48, authz 21/21, auth_lifecycle 34/34,
+  creation 37/37, pricing 62/62, dispatch 65/65, bid 61/61, lifecycle 65/65 PASS — **9/9
+  suítes, 406 asserções, sem regressão**. Bug de teste corrigido (leak residual de JWT —
+  `set_config(...,true)` is_local persiste até o fim da transação, não do bloco; lição
+  Sessão 06 reconfirmada: cada bloco autenticado reseta JWT para `'{}'` antes dos helpers,
+  seta o ator, reseta antes de system-only). `test_vio10_rpcs` TR8 ajustado (POD gate exige
+  POD antes de `in_transit→delivered`).
+- **Próxima**: Sessão 12 — POD completo (foto em Storage, OTP ao recebedor via WhatsApp,
+  geolocation, verificação do recebedor, gating de pickup POD, auto-confirm orquestrado).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

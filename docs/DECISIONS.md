@@ -26,6 +26,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-013 | Dispatch engine (busca de candidatos + raio progressivo, `quoted → searching_driver`) | Aprovado (Sessão 08) |
 | ADR-014 | Bid engine (scoring + seleção + `claim_delivery` atômico, `searching_driver → assigned`) | Aprovado (Sessão 09) |
 | ADR-015 | Harness de concorrência real (GATE de produção, ADR-007) | Aprovado (Sessão 10) |
+| ADR-016 | Ciclo completo pós-`assigned` + POD gate (matriz ator×transição, two-phase POD) | Aprovado (Sessão 11) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -128,6 +129,60 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 11 — Ciclo completo pós-`assigned` + POD gate (ADR-016)
+
+- **Refinar `transition_delivery` (não criar N RPCs de domínio)** (D1): a máquina de
+  estados permanece um **ponto único auditável**; o app do driver chama
+  `transition_delivery` com o status-alvo e a RPC autoriza por classe de papel
+  (system/admin/driver/business). Resolve o ator de `auth.uid()` → matriz estrutural M
+  (from→to, `invalid_transition` se impossível) → matriz de papel R (`not_authorized`
+  se o papel não pode). Admin perde as system-only `{draft→quoted, searching_driver→assigned,
+  searching_driver→expired, in_transit→delivered}`; driver só avanço forward-only
+  `{assigned→driver_to_pickup, driver_to_pickup→at_pickup, at_pickup→picked_up,
+  picked_up→in_transit}`; business só `{draft→cancelled, quoted→cancelled,
+  quoted→searching_driver, searching_driver→cancelled}`. **`draft→cancelled` adicionado
+  a M** (ausente antes — business pode cancelar draft). Assinatura inalterada.
+- **POD two-phase — driver submete, sistema confirma** (D4): por causa da sutileza de
+  `auth.uid()` em cadeia DEFINER (lê o JWT GUC, **não muda** com SECURITY DEFINER), um RPC
+  driver-scoped não pode disparar uma transição system-only internamente. Logo
+  `submit_proof_of_delivery` (driver-scoped: driver com assignment ativa ou system) insere
+  o POD + emite `pod_submitted` **sem transitar**; `confirm_delivery` (**system-only**)
+  valida o POD e chama `transition_delivery('delivered')`. **Submeter POD ≠ entregue**
+  (análogo a ACEITAR ≠ GANHAR, ADR-006). Em produção, **n8n** chama `confirm_delivery`
+  (webhook sobre `pod_submitted`); pré-n8n, o backend/service layer chama.
+- **POD gate em `transition_delivery`** (D5): `in_transit→delivered` exige POD
+  `pod_type='delivery'` — impede **qualquer** path (inclusive system direto sem POD) de
+  entregar sem prova. `confirm_delivery` pré-valida (D4) e o gate re-valida — defense in
+  depth. Espelha o padrão system-only de `create_quote`/`open_dispatch_round`/SWAC.
+- **Limite de reatribuição via metadata** (D2): `p_metadata->>'max_reassignments'`; se
+  `reassignment_count >= max` → `reassignment_limit_reached` **sem mutar** (orquestrador
+  então emite `→failed`). Sem `max` = ilimitado (back-compat com callers existentes).
+  Sem tabela de config no MVP — param do caller (como pesos de scoring ADR-014 e raio
+  ADR-013).
+- **`cancelled_reason`/`failed_reason` do metadata** (D3): colunas existiam (0007) mas
+  `transition_delivery` não as setava (só timestamps). Correção — seta de
+  `p_metadata->>'reason'` ao transitar para `cancelled`/`failed`.
+- **Completude do POD no MVP** (D6): delivery exige `(storage_path or otp_code)` **e**
+  `receiver_name`; pickup exige ao menos um de `storage_path`/`otp_code`/`notes`.
+  Estado: delivery exige `in_transit`; pickup exige `driver_to_pickup`/`at_pickup`/
+  `picked_up`/`in_transit`. Unique `(delivery_request_id, pod_type)` →
+  `pod_already_submitted` (captura `unique_violation`). Profundidade (foto em Storage,
+  OTP ao recebedor, geolocation, verificação do recebedor) → **Sessão 12**.
+- **Split 0025/0026** (D9): o gotcha `ALTER TYPE ... ADD VALUE` in-tx (valor de enum
+  adicionado numa transação pode não ser referenciável nela) exige 2 migrations — 0025
+  (enum + constraint, sem função) e 0026 (RPCs que referenciam `'pod_submitted'`). Cada
+  migration = transação separada no replay (curl por arquivo). Confirmado: `'pod_submitted'`
+  referenciável em 0026 no replay 26/26.
+- **Sem tabela nova; sem novos grants de DML a `authenticated`** (D8): INSERT em
+  `proof_of_delivery` só via DEFINER (RLS INSERT permanece default-deny — sem policy
+  nova). Único grant novo: `execute on confirm_delivery to service_role` (system-only;
+  `submit_proof_of_delivery` segue o padrão user-facing service_role+authenticated).
+- **Callers internos preservados**: `create_quote` (system→draft→quoted ✓), `confirm_quote`
+  (business/admin→quoted→searching_driver ✓) — a matriz refinada não os quebra.
+  `claim_delivery`/`select_winner_and_claim` **não** chamam `transition_delivery` — o GATE
+  da Sessão 10 (ADR-015) permanece íntegro (validado: bid 61/61, dispatch 65/65, sem
+  regressão).
 
 ### Sessão 10 — Atribuição atômica em concorrência real (GATE de produção, ADR-015)
 

@@ -6,6 +6,79 @@
 
 ## Histórico
 
+### Sessão 11 — Ciclo completo (máquina de estados pós-`assigned` + POD gate, ADR-016) — PASS
+
+- **ADR-016** escrito **antes** do código (matriz ator×transição D1, limite de reatribuição
+  via metadata D2, cancelled/failed reason D3, POD two-phase D4, POD gate D5, completude
+  D6, ator/eventos D7, sem tabela nova D8, split de migrations D9) — regra mestra respeitada.
+  "IA não inventa status" garantido: toda transição por `transition_delivery` (refinada,
+  assinatura inalterada); `delivered` é system-only via `confirm_delivery` (POD gate). O
+  driver não auto-certifica entrega — "Submeter POD ≠ entregue" (análogo a ACEITAR ≠
+  GANHAR, ADR-006).
+- **0025** — schema prep (sem funções): `alter type delivery_event_type add value
+  'pod_submitted'` + `unique (delivery_request_id, pod_type)` em `proof_of_delivery`. Sem
+  função que referencie o novo valor — evita o gotcha `ALTER TYPE ... ADD VALUE` in-tx.
+- **0026** — 3 RPCs `SECURITY DEFINER`:
+  - `transition_delivery` **refinada** (assinatura inalterada): resolve classe de papel
+    (system/admin/driver/business) de `auth.uid()`; matriz estrutural M primeiro
+    (`invalid_transition`), depois matriz de papel R (`not_authorized`); limite de
+    reatribuição (`p_metadata->>'max_reassignments'` — sem mutar se excedido); POD gate em
+    `delivered` (`pod_required` sem POD delivery); `cancelled_reason`/`failed_reason` do
+    metadata; `draft→cancelled` adicionado a M; supersede + `reassignment_count++`
+    (existente). Grants inalterados (service_role + authenticated).
+  - `submit_proof_of_delivery` (driver-scoped ou system; `search_path = public, extensions,
+    pg_catalog`): valida completude (delivery: storage/otp + receiver_name; pickup:
+    storage/otp/notes) + estado (delivery exige `in_transit`; pickup exige
+    `driver_to_pickup`/`at_pickup`/`picked_up`/`in_transit`); insere POD (`unique_violation`
+    → `pod_already_submitted`); emite `pod_submitted`; **não transita**. lat/lng double
+    precision → geography server-side (padrão 0021). Grants: service_role + authenticated.
+  - `confirm_delivery` (**system-only**, `search_path = public, pg_catalog`):
+    `auth.uid() not null` → `not_authorized`; valida POD delivery existe (`pod_required`);
+    chama `transition_delivery('delivered')` (alias `as t` + `t.ok, t.reason` — lição
+    Sessão 07) que **re-valida** o POD gate (defense in depth). Grants: `service_role`
+    **somente** (authenticated sem EXECUTE — defesa em profundidade). **Nenhuma
+    tabela/coluna nova.**
+- **`test_vio10_lifecycle.sql`** (65 asserções, begin/rollback + SELECT consolidado): T1-T22
+  (happy path driver, pulo de estado, driver não entrega/reatribui/cancela/falha, business
+  cancela pré-atribuição, admin pós-atribuição, system-only guard, limite de reatribuição,
+  supersede, submit POD driver/não-autorizado/inválido/duplicado/wrong_state, confirm
+  system/sem POD/system-only/wrong_state, POD gate direto, pickup POD, cancel/fail reason,
+  draft→cancelled). Geometria isolada por longitude (cada teste pickup em B=N.0). **65/65
+  PASS (real)**.
+- **Callers internos preservados**: `create_quote` (system→draft→quoted ✓), `confirm_quote`
+  (business/admin→quoted→searching_driver ✓). `claim_delivery`/`select_winner_and_claim` não
+  chamam `transition_delivery` — GATE da Sessão 10 permanece íntegro (validado: bid 61/61,
+  dispatch 65/65, sem regressão).
+- **Bug de teste encontrado e corrigido na validação** (não bug de RPC): leak residual de
+  JWT — `set_config('request.jwt.claims',...,true)` é is_local e persiste até o fim da
+  **transação**, não do bloco. A 1ª versão setava JWT=driver em T1 sem resetar → T2's
+  `mk_searching` rodava com `auth.uid()` = driver residual → `create_delivery_request`
+  `not_authorized` → id null → `mk_assigned` null → `null value in column "dr_id"`. Corrigido:
+  cada bloco reseta JWT para `'{}'` (system) antes dos helpers mk_*/create_*/confirm_quote,
+  seta o ator antes das chamadas autenticadas, reseta para `'{}'` antes de chamadas
+  system-only. **Lição Sessão 06 reconfirmada:** cada bloco autenticado deve resetar o JWT
+  explicitamente; herdar JWT de bloco anterior mascara falhas de authz (e aqui, falha de
+  setup). Diagnóstico exigiu captura do reason via temp table (RAISE NOTICE não alcança o
+  resultset do endpoint — lição Sessão 03.5). 65/65 na 2ª execução.
+- **`test_vio10_rpcs.sql` TR8 ajustado**: o POD gate novo (0026) faz `in_transit→delivered`
+  exigir POD; inserção de POD adicionada antes da transição no teste. 48/48 após.
+- **Reset/replay from-scratch**: `drop schema public cascade` + `delete from auth.users` +
+  recriar `public` (via SQL + Management API) + replay **0001→0026 em ordem** → 26/26
+  limpo. Inventário: 26 tabelas (nenhuma nova), RLS 26/26, POD unique `(delivery_request_id,
+  pod_type)`, enum `pod_submitted`, 3 RPCs DEFINER (`confirm_delivery` system-only — execute
+  só service_role, authenticated sem EXECUTE), `anon`=0 em `public`.
+- **Suítes re-executadas após reset from-scratch**: invariants **13/13**, rpcs **48/48**,
+  authz **21/21**, auth_lifecycle **34/34**, creation **37/37**, pricing **62/62**, dispatch
+  **65/65**, bid **61/61**, lifecycle **65/65** — **9/9 suítes, 406 asserções, todas PASS
+  (não simulado)**.
+- **Risco aberto (BAIXO) — inalterado**: offboarding/revogação de papel/membership
+  (`remove_platform_role`, `remove_org_member`) ainda deferido (lado driver FECHADO desde
+  Sessão 06). Lock-ordering `claim_delivery`↔SWAC (Sessão 10 D4) — dívida técnica observada,
+  não-hazard vivo, hardening adiado. Nenhum novo risco aberto na Sessão 11.
+- **Veredito**: GO para Sessão 12 (POD completo: foto em Storage, OTP ao recebedor via
+  WhatsApp, geolocation, verificação do recebedor, gating de pickup POD, auto-confirm
+  orquestrado).
+
 ### Sessão 10 — Atribuição atômica em concorrência real (GATE de produção, ADR-007) — PASS
 
 - **GATE de produção formalmente validado em concorrência REAL** (não simulada). A
