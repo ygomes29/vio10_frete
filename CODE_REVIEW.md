@@ -6,6 +6,34 @@
 
 ## Histórico
 
+### Sessão 14 — Camada de API: Next.js Route Handlers (pivot n8n → API layer, ADR-019) — PASS
+
+- **ADR-019** escrito como spec (D1-D9) antes da validação live. Route Handler é fino;
+  service layer detém a lógica; `service_role` nunca vaza; system-callers autenticam por
+  shared secret (timing-safe, fail-closed); idempotency ledger em `integration_events`;
+  provider 501 até Sessão 20; mapeamento RPC→HTTP; logs sem secrets.
+- **Regra mestra preservada**: nenhum estado mutado fora da RPC `SECURITY DEFINER`; o
+  handler só traduz HTTP↔RPC. `service_role` encapsulado server-side; n8n nunca o recebe.
+  `/quote`+`/enrich` 501 (não simulam provider) — trust boundary do pricing intacto.
+- **Bugs encontrados em revisão e corrigidos** (antes da validação live):
+  - `lib/idempotency/ledger.ts` `dedupKey` referenciava `opts.idempotency_key` (snake_case
+    inexistente — o `value` ficava `undefined`, ledger inteiro quebrado) → corrigido para
+    `opts.idempotencyKey`; `onConflict` fixo em `source,idempotency_key` → dinâmico por
+    coluna (dedup por `external_event_id` não era protegida contra race).
+  - `lib/supabase/server-client.ts` import `createServerClient` colidia com a fn local
+    (resolvia recursão/0-args) → alias `createSSRClient`; tipagem dos cookies `setAll`.
+  - `lib/rpc/result.ts` `{ ok:true, ...result, ...extra }` — `ok` overwritten pelo spread
+    (TS2783) → reordenado.
+- **Validação real (dev, não simulada)**: regressão 10/10 suítes (418 asserções) + vertical
+  slice via `next dev`+curl (19/19) — create, idempotência replay (0 duplicação, ledger
+  gravado), 501 shells, transitions, confirm-quote, open/close round (SWAC `no_candidates`+
+  `won→assigned`), OTP (6 dígitos, **não logado** — sensitive D8), confirm `delivered`.
+  Estado verificado no DB via Management API. Internal-auth fail-closed (401 sem secret).
+- **Testes unitários** vitest 43/43 PASS (validation, internal-auth, result mapping, http
+  parsing, idempotency ledger com client mockado) — rotulados unit, não PASS live.
+- **Ressalva**: endpoints driver/user-facing + webhook DataCrazy + cookie/middleware full →
+  Sessão 15 (declarado, não PASS). Provider Google Maps → Sessão 20 (501 hoje).
+
 ### Sessão 13 — Arquitetura dos workflows n8n (design dos 16 workflows, ADR-018) — PASS (design review)
 
 - **ADR-018** escrito **antes** do detalhamento dos workflows (D1-D11). Design puro — sem

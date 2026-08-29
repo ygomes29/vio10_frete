@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante (até ADR-018) |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-019) |
 
 ## Estado atual
 
@@ -293,7 +293,52 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   Wait + backstop DB. **Ressalva**: implementação + validação live deferidas — Sessão 14
   (n8n) + 15-16 (WhatsApp) + 17-19 (app Next.js/Route Handlers). Risco "camada externa não
   live-validada" (Sessão 12) mantido aberto.
-- **Próxima**: Sessão 14 — n8n: implementação dos workflows (instância n8n provisionada,
-  credenciais, nodes; Route Handlers system-scoped; live WhatsApp/DataCrazy Sessões 15-16).
+- **Sessão 14 (concluída — revisada, pivot n8n → API layer)**: Camada de API — Next.js
+  Route Handlers (contract surface ADR-018 D5) — **PASS**. Sessão 14 como escrita
+  (implementar n8n) estava BLOCKED (sem instância n8n/Route Handlers/WhatsApp; não simular
+  PASS); usuário pivotou para a **camada de API** ("backend → regras → APIs"). Entrega:
+  fundação Next.js 16.3.3 + 2 clients Supabase (user-scoped `@supabase/ssr` + system-scoped
+  `service_role` `server-only`) + internal-auth (shared secret `x-internal-api-key`,
+  timing-safe, **fail-closed**) + idempotency ledger (`integration_events`, service-only;
+  `withIdempotency` claim/replay/in_flight/skip) + service layer + **9 Route Handlers
+  system/internal** (`POST /api/internal/deliveries`, `/deliveries/[id]/{quote,enrich,
+  confirm-quote,dispatch/rounds,confirm,otp,transitions}`, `/dispatch/rounds/[id]/close`) +
+  provider abstraction (ADR-005, registry vazio → `/quote`+`/enrich` **501
+  `geo_provider_not_configured`** até Sessão 20, nunca haversine p/ pricing ADR-012 D2) +
+  **ADR-019** (D1 handler fino/service layer; D2 dois scopes; D3 shared secret; D4
+  idempotency ledger; D5 provider 501; D6 mapeamento RPC→HTTP `ok`→200/replay→200/`reason`→
+  4xx/exceção→500; D7 auth user mínima (Sessão 15); D8 logs sem secrets — OTP sensitive;
+  D9 validação real não simulada) + testes unitários vitest **43/43**. `service_role` nunca
+  vaza ao client/n8n/IA; n8n autentica por shared secret, handler usa system-client interno.
+  `claim_delivery` interno ao SWAC (sem endpoint, GATE Sessão 10). **Validação real (dev,
+  não simulada)**: regressão **10/10 suítes PASS** (418 asserções, pós reset+replay
+  0001→0028, 28/28 limpo) + vertical slice via `next dev`+curl **19/19** — 401 fail-closed,
+  create 200, **idempotência replay** (mesmo `Idempotency-Key` → mesmo id, 0 duplicação,
+  `integration_events` gravado), 400 invalid, 501 shells, transitions 200/422,
+  `wrong_state` 409, confirm-quote 200, open round 200, SWAC `no_candidates` 200 + **`won→
+  assigned` 200**, **OTP 200 (6 dígitos ao caller system, ausente do log — sensitive D8)**,
+  confirm id inexistente 422, **confirm `in_transit`+POD → `delivered` 200** (evento
+  `delivered` actor system); estado verificado no DB via Management API. Bugs corrigidos:
+  `ledger.ts` `dedupKey` snake_case (`opts.idempotency_key`→`opts.idempotencyKey`, value
+  undefined quebrava o ledger) + `onConflict` fixo→dinâmico por coluna; `server-client.ts`
+  import `createServerClient` colidia com fn local→alias `createSSRClient`; `result.ts`
+  spread `ok` overwritten (TS2783)→reordenado. **Ressalva**: endpoints driver/user-facing
+  (`respond_to_offer`, `submit_proof_of_delivery`, transitions driver-side via JWT+signed
+  links) + webhook router DataCrazy + cookie/refresh/middleware full → **Sessão 15**
+  (declarado, não PASS). Provider Google Maps real → **Sessão 20** (501 hoje). n8n
+  implementação reabre com Route Handlers + WhatsApp.
+- **Próxima**: Sessão 15 — endpoints driver/user-facing (`respond_to_offer`,
+  `submit_proof_of_delivery`, transitions driver-side via JWT+signed links) + webhook router
+  DataCrazy + cookie/refresh/middleware full (ADR-010 D6).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

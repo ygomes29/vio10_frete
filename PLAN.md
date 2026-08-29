@@ -322,8 +322,35 @@
     live-validada" (Sessão 12) mantido aberto.
   - **Veredito**: GO para Sessão 14 (implementação dos workflows em instância n8n
     provisionada).
-- **Próxima**: Sessão 14 — n8n: implementação dos workflows (instância n8n provisionada,
-  credenciais, nodes; Route Handlers system-scoped; live WhatsApp/DataCrazy Sessões 15-16).
+- **Sessão 14 (revisada — pivot n8n → API layer)**: Camada de API — Next.js Route Handlers
+  (contract surface ADR-018 D5) — **concluída — PASS**.
+  - **Pivot**: Sessão 14 como escrita (implementar n8n) estava BLOCKED (sem instância n8n,
+    Route Handlers, WhatsApp; não simular PASS). Usuário pivotou para a **camada de API** —
+    a camada que n8n **e** apps consomem, indicada por "backend → regras → APIs".
+  - **Entrega**: fundação Next.js 16.3.3 + 2 clients Supabase (user/system) + internal-auth
+    (shared secret timing-safe, fail-closed) + idempotency ledger (`integration_events`) +
+    service layer + **9 Route Handlers system/internal** (contract surface ADR-018 D5) +
+    provider abstraction (ADR-005, registry vazio → `/quote`+`/enrich` 501) + **ADR-019**
+    (D1-D9) + testes unitários vitest 43/43.
+  - **ADR-019**: D1 handler fino/service layer; D2 dois scopes; D3 shared secret; D4
+    idempotency ledger (claim/replay/in_flight/skip); D5 provider 501 (não haversine);
+    D6 mapeamento RPC→HTTP; D7 auth user mínima (Sessão 15); D8 logs sem secrets (OTP
+    sensitive); D9 validação real não simulada.
+  - **Validação real (dev, não simulada)**: regressão 10/10 suítes PASS (418 asserções, pós
+    reset+replay 0001→0028, 28/28) + vertical slice via `next dev`+curl (19/19): 401 fail-
+    closed, create 200, **idempotência replay** (0 duplicação, ledger gravado), 400 invalid,
+    501 shells, transitions 200/422, `wrong_state` 409, confirm-quote 200, open round 200,
+    SWAC `no_candidates` 200 + **`won→assigned` 200**, **OTP 200 (6 dígitos, não logado)**,
+    confirm `delivered` 200. Estado verificado no DB via Management API.
+  - **Bugs corrigidos**: `ledger.ts` `dedupKey` snake_case + `onConflict` fixo; `server-client`
+    import colidindo; `result.ts` spread `ok` overwritten.
+  - **Ressalva**: endpoints driver/user-facing + webhook DataCrazy + cookie/middleware full →
+    **Sessão 15**. Provider Google Maps → **Sessão 20** (501 hoje). n8n implementação reabre
+    com Route Handlers + WhatsApp.
+  - **Veredito**: GO para Sessão 15 (driver/user endpoints + webhook router + cookie/middleware).
+- **Próxima**: Sessão 15 — endpoints driver/user-facing (`respond_to_offer`,
+  `submit_proof_of_delivery`, transitions driver-side via JWT+signed links) + webhook router
+  DataCrazy + cookie/refresh/middleware full (ADR-010 D6).
 
 ## Roadmap (20 fases / 29 sessões)
 

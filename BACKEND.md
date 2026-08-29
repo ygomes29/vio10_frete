@@ -543,3 +543,83 @@ saber se venceu/perdeu, não apenas se houve exceção).
 - Enums via `pg_enum` no Postgres espelhados no TS.
 - Sem lógica de negócio fora do domínio. Sem chamada direta ao Google Maps fora da
   abstração de provider (ver `docs/GEOLOCATION.md`).
+
+## 10. Camada de API / Route Handlers (Sessão 14, ADR-019)
+
+A contract surface enumerada no ADR-018 D5 é **realizada em código** pela camada de API
+Next.js 16.3.3 (App Router). Os RPCs `SECURITY DEFINER` (Sessões 03-12) continuam sendo a
+fonte da verdade; os Route Handlers são **HTTP wrappers finos**.
+
+### 10.1 Estrutura
+
+```
+app/api/internal/**/route.ts   # Route Handlers system/internal (HTTP wrapper fino)
+lib/api/internal-handler.ts    # fluxo padrão: auth → parse → validate → idempotency → RPC → map
+lib/api/http.ts                # jsonResponse, requireInternal, getCorrelationId, getIdempotencyHeaders, logEvent
+lib/services/*.ts              # service layer: validate → idempotency → chamar RPC via client certo → map
+lib/rpc/{call,result}.ts       # callRpc (data[0] como RpcResult) + mapeamento reason→HTTP
+lib/supabase/{server,system}-client.ts  # dois clients, dois scopes
+lib/supabase/internal-auth.ts  # verifyInternalApiKey (timingSafeEqual, fail-closed)
+lib/idempotency/ledger.ts      # withIdempotency (claim/replay/in_flight/skip)
+lib/providers/{geocoding,routing}-provider.ts  # abstração ADR-005 (registry vazio)
+```
+
+### 10.2 Dois clients, dois scopes (ADR-019 D2)
+
+- `createServerClient()` — **user-scoped** (`@supabase/ssr`, cookie→JWT→`auth.uid()`, RLS
+  aplica). Operações de usuário/driver (Sessão 15).
+- `createSystemClient()` — **system-scoped** (`service_role`, `import "server-only"`, RLS
+  bypass, `auth.uid()` null). Os 5 RPCs system-only + escrita do idempotency ledger.
+  **`service_role` nunca exposto ao client/browser/n8n/IA** — vive só server-side.
+
+### 10.3 System-callers autenticam por shared secret (D3)
+
+n8n envia `x-internal-api-key` vs `INTERNAL_API_KEY` env, comparado em tempo constante
+(`crypto.timingSafeEqual`). **Fail-closed**: sem secret configurado → recusa tudo. Verificado
+→ handler usa `createSystemClient()` internamente. mTLS/IP-allowlist + rotação → Sessão 22/26.
+
+### 10.4 Idempotency ledger (D4, R17)
+
+`withIdempotency` claima em `integration_events` (service-only, 0015) **antes** da RPC
+mutante: `select → upsert(ignoreDuplicates onConflict source,<col>) → re-select`.
+`idempotency_key` (header `Idempotency-Key`) tem precedência sobre `external_event_id`;
+`onConflict` acompanha a coluna em uso. Conflito com `result` gravado = **replay**
+(retorna o resultado cacheado, **não** re-executa); `pending` sem `result` = `in_flight`
+→ 409; sem chave = `skip` (guards da RPC protegem). `correlation_id` → só log (não dedup).
+O guard real de criação é a RPC (`external_reference` on conflict, 0021:140); o ledger é
+defesa em profundidade + replay explícito + auditoria.
+
+### 10.5 Mapeamento RPC → HTTP (D6)
+
+`(ok=true) → 200`; replay (`reason=idempotent_replay`) → 200; `(ok=false, reason)` → 4xx
+(`not_authorized`→403, `invalid_param`→400, `wrong_state`/`round_*`/`already_*`/`otp_already_used`→409,
+`not_found`/`delivery_not_found`/`no_pricing_rule`/`pod_*`/`otp_*`→422, reason desconhecido→422);
+exceção do PostgREST → 500 + log `correlation_id`. Nunca vazar stack trace.
+
+### 10.6 Superfície de endpoints (realização ADR-018 D5)
+
+| Endpoint | RPC | Scope |
+|---|---|---|
+| `POST /api/internal/deliveries` | `create_delivery_request` | system (internal-auth) |
+| `POST /api/internal/deliveries/{id}/quote` | `create_quote` | system (**501** até Sessão 20) |
+| `POST /api/internal/deliveries/{id}/enrich` | (geocoding) | system (**501** até Sessão 20) |
+| `POST /api/internal/deliveries/{id}/confirm-quote` | `confirm_quote` | system |
+| `POST /api/internal/deliveries/{id}/dispatch/rounds` | `open_dispatch_round` | system-only |
+| `POST /api/internal/dispatch/rounds/{id}/close` | `select_winner_and_claim` | system-only |
+| `POST /api/internal/deliveries/{id}/confirm` | `confirm_delivery` | system-only |
+| `POST /api/internal/deliveries/{id}/otp` | `generate_delivery_otp` | system-only (sensitive) |
+| `POST /api/internal/deliveries/{id}/transitions` | `transition_delivery` (actor=system) | system |
+
+`claim_delivery` é **interno ao SWAC** — sem endpoint (GATE Sessão 10). `/quote` e `/enrich`
+retornam **501 `geo_provider_not_configured`** até o provider Google Maps (Sessão 20) —
+**não** usar haversine para pricing (ADR-012 D2).
+
+### 10.7 Validação real (D9)
+
+Regressão 10/10 suítes PASS no dev (pós reset+replay 0001→0028). Vertical slice via
+`next dev` + curl exercitou a contract surface inteira contra o DB real: create →
+(/quote,/enrich 501) → transitions → confirm-quote → open round → SWAC (`no_candidates` +
+`won→assigned`) → OTP (6 dígitos ao caller system, **ausente do log** — sensitive D8) →
+POD → confirm `delivered`. Idempotência: replay com mesmo `Idempotency-Key` → mesmo
+`delivery_request_id`, **0 duplicação**, `integration_events` gravado. Internal-auth
+fail-closed (401 sem secret). **Não simulado** (regra mestra).

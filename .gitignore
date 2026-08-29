@@ -8,6 +8,10 @@ node_modules/
 out/
 build/
 dist/
+next-env.d.ts
+
+# TypeScript build info
+*.tsbuildinfo
 
 # Env / secrets — NUNCA commitar
 .env

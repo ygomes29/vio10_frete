@@ -2,6 +2,67 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 14] — 2026-08-29 — Camada de API: Next.js Route Handlers (pivot n8n → API layer)
+
+> Sessão 14 como escrita no roadmap (implementar n8n) estava BLOCKED (sem instância n8n,
+> Route Handlers, WhatsApp). Usuário pivotou para a **camada de API** — a camada que n8n
+> **e** os apps consomem, indicada pela regra de execução ("backend → regras → APIs") agora
+> que backend+regras (Sessões 03-12) está validado.
+
+### Adicionado
+- **Fundação Next.js 16.3.3**: `package.json` (next@16.3.3, react@19.2.8, @supabase/ssr,
+  @supabase/supabase-js, vitest@4.1.11), `tsconfig.json`, `next.config.ts`, `vitest.config.ts`,
+  `app/layout.tsx`+`app/page.tsx` (placeholder), `middleware.ts` (mínimo), `.env.example`
+  (placeholders), `tailwind.config.*`/`postcss.config.*`.
+- **Clients Supabase**: `lib/supabase/server-client.ts` (user-scoped, `@supabase/ssr`,
+  cookie→JWT→`auth.uid()`, RLS) + `lib/supabase/system-client.ts` (`service_role`,
+  `server-only`, RLS bypass, singleton) + `lib/supabase/internal-auth.ts`
+  (`verifyInternalApiKey` timing-safe, fail-closed).
+- **Idempotency ledger**: `lib/idempotency/ledger.ts` — `withIdempotency` (claim/replay/
+  in_flight/skip) em `integration_events` (service-only). `idempotency_key` precede
+  `external_event_id`; `onConflict` dinâmico por coluna.
+- **Provider abstraction**: `lib/providers/{geocoding,routing}-provider.ts` (ADR-005),
+  registry vazio — `/quote`+`/enrich` = 501 até Sessão 20.
+- **Service layer + helpers**: `lib/services/{deliveries,dispatch,geo}.ts`,
+  `lib/api/{http,internal-handler}.ts`, `lib/rpc/{call,result}.ts`.
+- **Route Handlers system/internal** (`app/api/internal/**/route.ts`, 9 endpoints):
+  `deliveries` (create), `deliveries/[id]/{quote,enrich,confirm-quote,dispatch/rounds,
+  confirm,otp,transitions}`, `dispatch/rounds/[id]/close`. Fluxo padrão em
+  `handleInternalPost`: internal-auth → parse → validate (pré-claim) → idempotency →
+  RPC → map → HTTP.
+- **ADR-019** — Camada de API: Route Handlers (D1-D9: handler fino; dois scopes; shared
+  secret; idempotency ledger; provider 501; mapeamento RPC→HTTP; auth user mínima; logs
+  sem secrets; validação real não simulada).
+- **Testes unitários** (vitest, 43/43 PASS): `validateCreateDelivery`,
+  `validateDispatchRoundBody`, `verifyInternalApiKey` (fail-closed), `reasonToStatus`/
+  `toApiResponse`/`isReplay`, `getCorrelationId`/`getIdempotencyHeaders`, `withIdempotency`
+  (run/replay/in_flight/race/skip com client mockado). Stub `server-only` no vitest.
+- **BACKEND.md §10** (Camada de API / Route Handlers) + **ARCHITECTURE.md §14**.
+
+### Validado (real, dev — não simulado)
+- **Regressão 10/10 suítes PASS** (pós reset+replay 0001→0028, 28/28 limpo): invariants,
+  rpcs, authz 21/21, auth_lifecycle 34/34, creation 37/37, pricing 62/62, dispatch 65/65,
+  bid 61/61, lifecycle 67/67, pod_completo 40/40 — 418 asserções, zero regressão.
+- **Vertical slice via `next dev`+curl** (19/19 comportamentos): 401 sem secret (fail-closed);
+  create 200 (system path); **idempotência replay** (mesmo `Idempotency-Key` → mesmo id,
+  0 duplicação, `integration_events` gravado); invalid 400; `/quote`+`/enrich` 501;
+  transitions draft→cancelled 200 + `invalid_transition` 422; `wrong_state` 409;
+  confirm-quote 200; open round 200; SWAC `no_candidates` 200 (ok=true) + **SWAC `won→assigned`
+  200**; **OTP 200 (6 dígitos ao caller system, ausente do log — sensitive D8)**; confirm
+  id inexistente 422; **confirm `in_transit`+POD → `delivered` 200** (evento `delivered`
+  actor system). Estado verificado no DB via Management API.
+- **Bugs corrigidos**: `ledger.ts` `dedupKey` referenciava `opts.idempotency_key` (snake_case
+  inexistente) → `opts.idempotencyKey` (value ficava undefined, ledger quebrado); `onConflict`
+  fixo → dinâmico por coluna. `server-client.ts` import `createServerClient` conflitava com
+  a fn local → alias `createSSRClient`. `result.ts` `ok` duplicado no spread → reordenado.
+
+### Ressalva
+- Endpoints driver/user-facing (`respond_to_offer`, `submit_proof_of_delivery`, transitions
+  driver-side via JWT+signed links), webhook router DataCrazy, cookie/middleware full →
+  **Sessão 15** (declarado, não PASS).
+- Provider Google Maps real (`/quote`,`/enrich` end-to-end) → **Sessão 20** (501 hoje).
+- Implementação n8n (instância provisionada) → reabre quando Route Handlers + WhatsApp existirem.
+
 ## [Sessão 13] — 2026-08-28 — Arquitetura dos workflows n8n (design dos 16 workflows)
 
 ### Adicionado

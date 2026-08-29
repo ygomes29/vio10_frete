@@ -204,3 +204,33 @@ nunca chama Google diretamente. Localização do entregador tem conceito de `sta
 - **Auditoria**: `delivery_events` imutável (trigger bloqueia update/delete).
 - **RLS**: habilitado em todas as tabelas, default deny. Políticas na Sessão 04.
 - **Financeiro** (payments/payouts/ledger): adiado à Sessão 21.
+
+## 14. Camada de API — Route Handlers Next.js (Sessão 14, ADR-019)
+
+A **contract surface** do ADR-018 D5 (12 endpoints → 11 RPCs) é realizada em código pela
+camada de API Next.js 16.3.3 (App Router). Os RPCs `SECURITY DEFINER` (Sessões 03-12)
+permanecem a fonte da verdade; os Route Handlers são **HTTP wrappers finos** (BACKEND §10).
+
+- **Dois clients, dois scopes**: `createServerClient()` (user-scoped, cookie→JWT→`auth.uid()`,
+  RLS aplica) para usuário/driver; `createSystemClient()` (`service_role`, `server-only`, RLS
+  bypass, `auth.uid()` null) para os 5 system-only + ledger. **`service_role` nunca vaza** ao
+  client/n8n/IA.
+- **System-callers (n8n) autenticam por `x-internal-api-key`** (shared secret, timing-safe,
+  fail-closed) — nunca por `service_role`. Verificado → handler usa system-client interno.
+- **Idempotency ledger** (`integration_events`, service-only): `withIdempotency` claima antes
+  da RPC mutante; replay retorna o resultado cacheado sem re-executar; `in_flight` → 409.
+  `Idempotency-Key`→retry dedup; `external_event_id`→inbound dedup; `correlation_id`→só log
+  (R17 — não misturar).
+- **Mapeamento RPC→HTTP**: `ok=true`→200, `reason=idempotent_replay`→200, `ok=false`→4xx por
+  reason, exceção→500. Sem stack trace.
+- **Provider atrás da abstração** (ADR-005): `GeocodingProvider`/`RoutingProvider` com
+  registry vazio; `/quote` e `/enrich` retornam **501 `geo_provider_not_configured`** até a
+  Sessão 20 (Google Maps `TWO_WHEELER`). Trust boundary do pricing preservado (distância do
+  provider, nunca do business; nunca haversine — ADR-012 D2).
+- **Validação real** (não simulada): regressão 10/10 suítes PASS no dev + vertical slice via
+  `next dev`+curl (create→…→SWAC `won→assigned`→OTP→POD→`delivered`), idempotência replay
+  confirmada (0 duplicação), internal-auth fail-closed, OTP sensitive (não logado).
+
+Endpoints driver/user-facing (`respond_to_offer`, `submit_proof_of_delivery`, transitions
+driver-side via JWT+signed links), webhook router DataCrazy e cookie/middleware full →
+**Sessão 15**.
