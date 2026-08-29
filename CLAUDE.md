@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante (até ADR-017) |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-018) |
 
 ## Estado atual
 
@@ -269,7 +269,31 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   comportamental + camada n8n/WhatsApp **não validados live** (Storage é API separada, não
   exercitável via curl — só estrutural; n8n #13 + envio OTP especificados em docs; live
   Sessões 14/15-16/17-19). Não simulado.
-- **Próxima**: Sessão 13 — n8n: arquitetura dos workflows (design dos 16 workflows,
-  trigger/input/validações/operações/chamadas ao backend/eventos/retries/idempotência).
+- **Sessão 13 (concluída)**: n8n — arquitetura dos workflows (design dos 16 workflows) —
+  **PASS (design review)**. **Design puro** (sem migration/schema/RPC/grant novo; sem
+  validação live — n8n não provisionado; não simular PASS, regra mestra). Entrega:
+  ADR-018 + `N8N_WORKFLOWS.md` completo (16 workflows no template). ADR-018 (D1 n8n
+  orquestrador nunca fonte da verdade — chama Route Handlers, nunca SQL/Server Actions,
+  `service_role` nunca vaza ao n8n/IA, n8n nunca decide atribuição/cotação/entrega sozinho;
+  D2 trigger model Realtime+reconciler sobre `delivery_events` p/ estado interno + webhook
+  p/ inbound; D3 timeout n8n Wait + backstop DB — sem schema novo, `expires_at` já em 0023,
+  sem pg_cron; D4 raio progressivo orquestrado pelo n8n, config em constantes/env no MVP
+  — `dispatch_config` deferida p/ Sessão 26; D5 Route Handler contract surface enumerada —
+  12 endpoints, os 5 system-only (`create_quote`, `open_dispatch_round`,
+  `select_winner_and_claim`, `confirm_delivery`, `generate_delivery_otp`) por Route Handler
+  system-scoped, `claim_delivery` interno ao SWAC sem endpoint; D6 idempotência R17 mapeada
+  — `Idempotency-Key`/`external_event_id`/`external_reference`/`correlation_id` não
+  misturar; D7 retry/DLQ+reconciler; D8 geocoding/routing via backend — provider atrás da
+  abstração ADR-005, trust boundary do pricing; D9 n8n nunca decide atribuição — SWAC decide,
+  ACEITAR ≠ GANHAR ADR-006; D10 correlation_id end-to-end + PII minimizada; D11 escopo =
+  design, Sessão 14 = implementação). **Contrato verificado contra as migrations**: 23
+  `delivery_event_type` (21 em 0002 + `pod_submitted` 0025 + `otp_generated` 0027), 11 RPCs
+  centrais (5 system-only), assinaturas e enums conferidos — nenhuma RPC/evento inventado.
+  **Decisões de usuário** (via `AskUserQuestion`): trigger Realtime+reconciler; timeout n8n
+  Wait + backstop DB. **Ressalva**: implementação + validação live deferidas — Sessão 14
+  (n8n) + 15-16 (WhatsApp) + 17-19 (app Next.js/Route Handlers). Risco "camada externa não
+  live-validada" (Sessão 12) mantido aberto.
+- **Próxima**: Sessão 14 — n8n: implementação dos workflows (instância n8n provisionada,
+  credenciais, nodes; Route Handlers system-scoped; live WhatsApp/DataCrazy Sessões 15-16).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.

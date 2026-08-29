@@ -2,6 +2,61 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 13] — 2026-08-28 — Arquitetura dos workflows n8n (design dos 16 workflows)
+
+### Adicionado
+- **ADR-018** — Arquitetura dos workflows n8n: D1-D11 (n8n orquestrador nunca fonte da
+  verdade; trigger Realtime+reconciler/webhook; timeout n8n Wait+backstop DB; raio
+  progressivo orquestrado pelo n8n com config em constantes no MVP; Route Handler contract
+  surface enumerada — 12 endpoints; idempotência R17 mapeada; retry/DLQ+reconciler;
+  geocoding/routing via backend; n8n nunca decide atribuição — SWAC decide; correlation_id
+  end-to-end + PII minimizada; escopo = design, Sessão 14 = implementação).
+- **`docs/N8N_WORKFLOWS.md`** — design completo dos **16 workflows** no template "para cada
+  workflow" (trigger, input, validações, operações, chamadas ao backend, eventos gerados,
+  retries, idempotency key, tratamento de erro, logs). Workflow #13 (Sessão 12) formalizado
+  no template e integrado ao reconciler. Modelo de trigger, timeout, contract surface,
+  idempotência R17 e caminho feliz documentados.
+- **`docs/DECISIONS.md`** — ADR-018 indexado + decisões Sessão 13 (D1-D11).
+- **`docs/CODE_REVIEW.md`** — Sessão 13 PASS (design review).
+
+### Decisões
+- **Trigger model**: Realtime sobre `delivery_events` (estado interno) + reconciler
+  periódico (reprocessa eventos perdidos/estados presos) + webhook (inbound). Confirmadas
+  com o usuário via `AskUserQuestion`.
+- **Timeout da rodada**: n8n Wait node primário + reconciler backstop DB (fecha rodadas
+  `expires_at < now()` e `open`). **Sem schema novo** — `expires_at` já existe em 0023.
+- **n8n nunca decide atribuição**: `select_winner_and_claim` (system-only) decide +
+  chama `claim_delivery` atomicamente; ACEITAR ≠ GANHAR (ADR-006). n8n não chama
+  `claim_delivery` direto (GATE Sessão 10).
+- **Route Handler contract surface**: 12 endpoints; os 5 system-only vão por Route Handlers
+  system-scoped (Service Role interno), nunca expostos ao n8n/IA. Contrato de implementação
+  para Sessão 14 (n8n) e Sessões 17-19 (Next.js Route Handlers).
+- **Escopo = design puro**: sem migration/schema/RPC/grant novo; sem validação live (n8n
+  não provisionado; não simular PASS — regra mestra). Implementação Sessão 14.
+
+### Validado
+- **Nenhum** (design puro — n8n/WhatsApp não provisionados). Contrato verificado contra as
+  migrations: 23 valores de `delivery_event_type` (21 em 0002 + `pod_submitted` 0025 +
+  `otp_generated` 0027), 11 RPCs centrais (5 system-only), assinaturas e enums conferidos.
+  Nenhuma RPC/evento inventado.
+
+### Não implementado (deferido)
+- Implementação dos workflows em instância n8n provisionada (credenciais, nodes) → Sessão 14.
+- Live WhatsApp/DataCrazy (OTP/ofertas entregues de verdade) → Sessões 15-16.
+- App Next.js (Route Handlers implementados, Storage API) → Sessões 17-19.
+- `dispatch_config` table (config de raio/max_rounds em DB) → Sessão 26 (MVP: constantes n8n).
+- Provider geográfico real (Google Maps) → Sessão 20 (MVP: contrato via Route Handler).
+- Kill switches/limites em DB → Sessão 26.
+
+### Riscos
+- "Camada externa não live-validada" (Sessão 12) **mantido aberto** — Sessão 13 é design;
+  validação live da orquestração+n8n+WhatsApp é Sessão 14/15-16.
+- Dívida técnica observada: config de dispatch em constantes do n8n (não DB) —
+  endurecido em Sessão 26.
+
+### Veredito
+- **GO para Sessão 14** (implementação dos workflows em instância n8n provisionada).
+
 ## [Sessão 12] — 2026-08-28 — POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage)
 
 ### Adicionado

@@ -6,6 +6,48 @@
 
 ## Histórico
 
+### Sessão 13 — Arquitetura dos workflows n8n (design dos 16 workflows, ADR-018) — PASS (design review)
+
+- **ADR-018** escrito **antes** do detalhamento dos workflows (D1-D11). Design puro — sem
+  migration/schema/RPC/grant novo, sem validação live (n8n não provisionado; não simular
+  PASS — regra mestra).
+- **Contrato verificado contra as migrations** (não inventar RPC/evento):
+  - **23 valores de `delivery_event_type`**: 21 em 0002 + `pod_submitted` (0025) +
+    `otp_generated` (0027). Superfície de trigger do Realtime confirmada.
+  - **11 RPCs centrais** com assinaturas conferidas: `create_delivery_request` (0021),
+    `create_quote` (0022, system-only), `confirm_quote` (0023), `open_dispatch_round`
+    (0023, system-only), `select_winner_and_claim` (0024, system-only), `respond_to_offer`
+    (0016), `transition_delivery` (0028 refinada), `submit_proof_of_delivery` (0028
+    refinada), `confirm_delivery` (0028, system-only), `generate_delivery_otp` (0028, 5º
+    system-only), `claim_delivery` (interno ao SWAC, sem endpoint).
+  - **Enums**: `bid_response_type` (accept/counter_bid/decline), `pod_type`
+    (pickup/delivery), `dispatch_round_status` (open/closed/superseded/expired),
+    `delivery_status` (12 valores), `delivery_request_origin` — conferidos.
+  - **5 system-only** confirmados: `create_quote`, `open_dispatch_round`,
+    `select_winner_and_claim`, `confirm_delivery`, `generate_delivery_otp` — todos
+    `auth.uid() is not null → not_authorized`. Vão por Route Handlers system-scoped.
+- **Regra mestra respeitada estruturalmente**: n8n nunca chama SQL/Server Actions/
+  `claim_delivery` direto; os 5 system-only vão por Route Handler system-scoped;
+  `service_role` nunca vaza ao n8n/IA; n8n nunca decide atribuição/cotação/entrega sozinho.
+  ACEITAR ≠ GANHAR (ADR-006) preservado — `respond_to_offer` não atribui; SWAC decide.
+- **Caminhos fecham** (happy + falha + terminal): loop de raio progressivo (#5→#8→#9),
+  two-phase POD/OTP (#11 OTP-send em `in_transit` + #13 confirm em `pod_submitted`),
+  terminais (#14), retry/reconciler (#15). Sem estado preso — reconciler (D2) reprocessa
+  eventos perdidos + estados presos (drafts sem quote, `searching_driver` sem rodada
+  aberta, rodadas `open` com `expires_at < now()`).
+- **Timeout sem schema novo** (D3): n8n Wait primário + reconciler backstop usando
+  `expires_at` existente (0023). Sem pg_cron — orquestração fica no n8n.
+- **Idempotência R17 não misturada** (D6): `Idempotency-Key` (retry), `external_event_id`
+  (inbound), `external_reference` (criação), `correlation_id` (trace). Mapeamento
+  consistente com Sessão 04 (R16/R17).
+- **PII minimizada** (D10): sem PII do cliente nas ofertas antes da atribuição; telefone do
+  recebedor só no envio do OTP; nunca logar plaintext do OTP (só hash no banco).
+- **Ressalva (regra mestra)**: implementação + validação live **deferidas** para a Sessão
+  14 (requer n8n provisionado, credenciais, WhatsApp). Sessão 13 é design — nenhum runtime
+  exercitado. Risco "camada externa não live-validada" (Sessão 12) mantido aberto.
+- **Veredito**: **GO para a Sessão 14** (implementação dos workflows em instância n8n
+  provisionada). Nenhum novo risco aberto na Sessão 13.
+
 ### Sessão 12 — POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage, ADR-017) — PASS (com ressalva)
 
 - **ADR-017** escrito **antes** do código (D1 OTP em `delivery_otps`, D2 gate de geo

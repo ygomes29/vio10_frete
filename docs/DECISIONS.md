@@ -28,6 +28,7 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-015 | Harness de concorrência real (GATE de produção, ADR-007) | Aprovado (Sessão 10) |
 | ADR-016 | Ciclo completo pós-`assigned` + POD gate (matriz ator×transição, two-phase POD) | Aprovado (Sessão 11) |
 | ADR-017 | POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage) | Aprovado (Sessão 12) |
+| ADR-018 | Arquitetura dos workflows n8n (design dos 16 workflows, trigger model, timeout) | Aprovado (Sessão 13) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 
@@ -130,6 +131,47 @@ Aprovadas na Sessão 02 (2026-08-27).
   (`account_status` ∈ active/suspended/blocked; não volta a `pending`) — fecha o lado
   driver do risco "revogação" em aberto desde a Sessão 05. `remove_platform_role`/
   `remove_org_member` (revogação de papel/membership) ainda deferidos.
+
+### Sessão 13 — Arquitetura dos workflows n8n (ADR-018)
+
+- **Escopo: design puro** (decisão do usuário no planejamento): o design completo dos 16
+  workflows n8n — **sem** migration/schema/RPC/grant novo, **sem** validação live (n8n
+  provisionado só na Sessão 14; não simular PASS — regra mestra). Entrega: ADR-018 +
+  `N8N_WORKFLOWS.md` completo (16 workflows no template).
+- **D1 — n8n é orquestrador, nunca fonte da verdade**: chama Route Handlers (nunca
+  SQL/Server Actions); backend decide user-scoped vs system-scoped; `service_role` nunca
+  vaza ao n8n/IA; n8n nunca decide atribuição/cotação/entrega sozinho.
+- **D2 — Trigger model: Realtime + reconciler (estado interno); webhook (inbound)**:
+  Realtime sobre `delivery_events` (filtro por `event_type`) para #3/#4/#11/#13;
+  reconciler periódico (parte de #15) reprocessa eventos perdidos + estados presos; inbound
+  #1/#7/#16 continua webhook (dedup `webhook_events.external_id`). Honra "Banco é a fonte
+  da verdade".
+- **D3 — Timeout da rodada: n8n Wait + backstop DB**: Wait node primário
+  (`response_window_seconds` após #5); reconciler backstop fecha rodadas `expires_at < now()`
+  e `open` que o Wait perdeu. **Sem schema novo** (`expires_at` existe em 0023); sem
+  pg_cron (orquestração fica no n8n).
+- **D4 — Raio progressivo orquestrado pelo n8n; config em constantes/env no MVP**: loop
+  #5→#6→#8→#9→#5 é do n8n (não do RPC, ADR-013 D5); sequência de raios/max_candidates/
+  `driver_offer_cents`/window de constantes do n8n (`dispatch_config` deferida p/ Sessão
+  26); `open_dispatch_round` abre uma rodada por chamada; `round_already_open` guard.
+- **D5 — Route Handler contract surface enumerada**: 12 endpoints mapeiam n8n→RPC com
+  escopo correto; os 5 system-only (`create_quote`, `open_dispatch_round`,
+  `select_winner_and_claim`, `confirm_delivery`, `generate_delivery_otp`) vão por Route
+  Handlers system-scoped — nunca expostos ao n8n/IA direto. `claim_delivery` interno ao
+  SWAC (sem endpoint).
+- **D6 — Idempotência mapeada (R17, não misturar)**: `Idempotency-Key`→retry dedup;
+  `external_event_id`→webhook/event inbound dedup; `external_reference`→criação dedup;
+  `correlation_id`→trace (não dedup).
+- **D7 — Retry/DLQ: backoff exponencial + dead-letter + reconciler**: retries normais;
+  DLQ após N + alerta (#12); reconciler reprocessa; idempotência garante no-double-effect.
+- **D8 — Geocoding/routing = providers, chamados pelo backend**: n8n não chama Google
+  Maps direto; chama Route Handler (`/enrich`, `/quote`) que invoca o provider atrás da
+  abstração (ADR-005). Trust boundary do pricing: distância/duração vêm do provider,
+  nunca do business.
+- **D9 — n8n nunca decide atribuição; SWAC decide**: `select_winner_and_claim` pontua +
+  chama `claim_delivery` atomicamente; n8n só pede o close; ACEITAR ≠ GANHAR (ADR-006).
+- **D10 — correlation_id end-to-end; logs sem secrets, PII minimizada**.
+- **D11 — Escopo Sessão 13 = design; Sessão 14 = implementação**. Veredito GO → Sessão 14.
 
 ### Sessão 12 — POD completo: OTP do recebedor, gate de geo, gate de pickup POD, Storage (ADR-017)
 

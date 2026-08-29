@@ -295,8 +295,35 @@
     + envio OTP especificados em docs; `generate_delivery_otp` é DB validado). Live: Sessões
     14 (n8n) + 15-16 (WhatsApp) + 17-19 (app Next.js/Storage API).
   - **Veredito**: GO para Sessão 13 (n8n: arquitetura dos workflows).
-- **Próxima**: Sessão 13 — n8n: arquitetura dos workflows (design dos 16 workflows,
-  trigger/input/validações/operações/chamadas ao backend/eventos/retries/idempotência).
+- **Sessão 13 (atual)**: n8n — arquitetura dos workflows (design dos 16 workflows) —
+  **concluída — PASS (design review)**.
+  - **Design puro**: sem migration/schema/RPC/grant novo; sem validação live (n8n não
+    provisionado; não simular PASS — regra mestra). Entrega: ADR-018 +
+    `N8N_WORKFLOWS.md` completo (16 workflows no template) + checkpoint docs.
+  - **ADR-018**: D1 n8n orquestrador nunca fonte da verdade (chama Route Handlers, nunca
+    SQL/Server Actions; `service_role` nunca vaza; n8n nunca decide atribuição/cotação/
+    entrega sozinho); D2 trigger model Realtime+reconciler (estado interno) + webhook
+    (inbound); D3 timeout n8n Wait + backstop DB (sem schema novo — `expires_at` existe em
+    0023; sem pg_cron); D4 raio progressivo orquestrado pelo n8n, config em constantes/env
+    no MVP (`dispatch_config` deferida p/ Sessão 26); D5 Route Handler contract surface
+    enumerada (12 endpoints; 5 system-only por Route Handler system-scoped;
+    `claim_delivery` interno ao SWAC sem endpoint); D6 idempotência R17 mapeada (não
+    misturar); D7 retry/DLQ+reconciler; D8 geocoding/routing via backend (provider atrás da
+    abstração, ADR-005); D9 n8n nunca decide atribuição — SWAC decide (ACEITAR ≠ GANHAR,
+    ADR-006); D10 correlation_id end-to-end + PII minimizada; D11 escopo design, Sessão 14
+    implementação.
+  - **Contrato verificado contra as migrations**: 23 `delivery_event_type` (21 em 0002 +
+    `pod_submitted` 0025 + `otp_generated` 0027), 11 RPCs centrais (5 system-only),
+    assinaturas e enums conferidos. Nenhuma RPC/evento inventado.
+  - **Decisões de usuário** (confirmadas via `AskUserQuestion`): trigger model Realtime+
+    reconciler; timeout n8n Wait + backstop DB.
+  - **Ressalva (regra mestra)**: implementação + validação live deferidas — Sessão 14 (n8n)
+    + 15-16 (WhatsApp) + 17-19 (app Next.js/Route Handlers). Risco "camada externa não
+    live-validada" (Sessão 12) mantido aberto.
+  - **Veredito**: GO para Sessão 14 (implementação dos workflows em instância n8n
+    provisionada).
+- **Próxima**: Sessão 14 — n8n: implementação dos workflows (instância n8n provisionada,
+  credenciais, nodes; Route Handlers system-scoped; live WhatsApp/DataCrazy Sessões 15-16).
 
 ## Roadmap (20 fases / 29 sessões)
 
