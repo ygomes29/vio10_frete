@@ -2,7 +2,7 @@ import "server-only";
 import { requireInternal, jsonResponse, getCorrelationId, getIdempotencyHeaders, logEvent } from "./http";
 import { createSystemClient } from "@/lib/supabase/system-client";
 import { withIdempotency, InFlightError } from "@/lib/idempotency/ledger";
-import { toApiResponse, reasonToStatus } from "@/lib/rpc/result";
+import { toApiResponse, reasonToStatus, redactFields } from "@/lib/rpc/result";
 import type { RpcResult } from "@/lib/rpc/result";
 
 type HandlerOpts = {
@@ -14,6 +14,10 @@ type HandlerOpts = {
   run: (correlationId: string, body: unknown) => Promise<RpcResult>;
   /** Se true, não loga o body nem o resultado detalhado (ex.: OTP — ADR-019 D8). */
   sensitive?: boolean;
+  /** Campos do `RpcResult` a redact do response body (ex.: `otp_code` — ADR-021 D7:
+   *  OTP plaintext nunca sai do backend; n8n usa `/notifications/send type:otp`). Aplica-se
+   *  em first-call E replay (replay devolve o resultado cacheado, que conteria o campo). */
+  redact?: string[];
 };
 
 /**
@@ -44,6 +48,11 @@ export async function handleInternalPost(request: Request, opts: HandlerOpts): P
   }
 
   const client = createSystemClient();
+  // Redact também do resultado gravado no ledger: `recordResult` persiste `result`
+  // em `integration_events.result` (jsonb). Sem isso, o plaintext do OTP ficaria
+  // indefinidamente no ledger (além do TTL do OTP) — ADR-021 D7. Redact antes do
+  // `withIdempotency` → ledger, replay e response todos sem o campo.
+  const redactKeys = opts.redact ?? [];
   try {
     const result = await withIdempotency(
       client,
@@ -54,7 +63,10 @@ export async function handleInternalPost(request: Request, opts: HandlerOpts): P
         eventType: opts.eventType,
         payload: opts.sensitive ? null : (body as Record<string, unknown> | null),
       },
-      () => opts.run(correlationId, body),
+      async () => {
+        const r = await opts.run(correlationId, body);
+        return redactKeys.length ? (redactFields(r, redactKeys) as RpcResult) : r;
+      },
     );
     const api = toApiResponse(result, { correlation_id: correlationId });
     logEvent({ correlation_id: correlationId, event: opts.eventType, ok: result.ok, reason: result.reason });

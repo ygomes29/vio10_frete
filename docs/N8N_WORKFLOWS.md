@@ -1,12 +1,16 @@
 # docs/N8N_WORKFLOWS.md — Workflows n8n
 
-> **Arquitetura** dos workflows desenhada na Sessão 13 (ADR-018) e **implementada** na
-> Sessão 14. Este arquivo fixa as **regras obrigatórias** e o **design completo** dos 16
-> workflows. Assinaturas de RPC e valores de `delivery_event_type` aqui são
-> **verificados contra as migrations** (não inventados).
+> **Arquitetura** dos workflows desenhada na Sessão 13 (ADR-018), **trigger model
+> revisado** na Sessão 16 (ADR-022 — Realtime → Database Webhooks) e **contrato
+> alinhado** à camada de API (Sessões 14-15, ADR-019/ADR-020) e ao outbound WhatsApp
+> (Sessão 16, ADR-021). Este arquivo fixa as **regras obrigatórias** e o **design
+> completo** dos 16 workflows. Assinaturas de RPC e valores de `delivery_event_type`
+> aqui são **verificados contra as migrations** (não inventados).
 >
-> **Status de validação:** design concluído (Sessão 13). Implementação + validação live
-> **deferidas** para a Sessão 14 (requer n8n provisionado). Não simulado (regra mestra).
+> **Status de validação:** design concluído (Sessão 13) + trigger model revisado
+> (Sessão 16, ADR-022). Implementação + validação live **deferidas** para a Phase 2
+> (requer n8n provisionado — URL + Public API key + versão fornecidos pelo usuário).
+> Não simulado (regra mestra).
 
 ## Regra obrigatória
 
@@ -26,16 +30,24 @@
   `external_reference` — R17, não misturar).
 - Workflows separados, observáveis, versionáveis — **não** monolíticos.
 
-## Modelo de trigger (ADR-018 D2)
+## Modelo de trigger (ADR-022 D1 — supersede ADR-018 D2)
 
-- **Estado interno** (#3, #4, #11, #13): **Supabase Realtime** sobre `delivery_events`
-  (filtro por `event_type`). DB é a fonte da verdade; eventos já são auditados.
-- **Reconciler** (parte de #15, periódico): reprocessa `delivery_events` não-processados
-  (n8n down) + estados presos. Idempotente via `external_event_id` + estado da corrida.
-- **Inbound** (#1, #7, #16): **webhook HTTP** — DataCrazy/motorista não falam Realtime.
-  Dedup via `webhook_events.external_id`.
+- **Estado interno** (#2, #6, #8, #10, #11, #13, #14): **Supabase Database Webhooks**
+  (`pg_net` + `supabase_functions`) sobre `delivery_events` **INSERT**. O trigger
+  Postgres faz `HTTP POST` do registro ao **Webhook node** n8n; um **Switch node**
+  roteia por `record.event_type` (D2). **Não** é a publicação `supabase_realtime`
+  (canal WebSocket — outra coisa). DB é a fonte da verdade; eventos já são auditados.
+- **Reconciler** (parte de #15, periódico): **Schedule Trigger** chama
+  `POST /api/internal/reconciler/scan` (read-only, state-based) — backend devolve
+  **estado preso** (rodadas `open` expiradas, drafts sem quote, `searching_driver` sem
+  rodada). n8n **não query o DB direto** (regra mestra); reprocessa cada achado via
+  Route Handlers. Idempotente por estado da corrida.
+- **Inbound** (#1, #7, #16): **backend router** (`POST /api/webhooks/datacrazy`,
+  ADR-020 D5: signature+dedup+route+200) — DataCrazy/motorista não falam o n8n
+  direto. n8n **não** está no caminho inbound (D3 do usuário, ADR-022 D8). Dedup via
+  `webhook_events.external_id`.
 
-## Timeout da rodada (ADR-018 D3)
+## Timeout da rodada (ADR-022 D3)
 
 - **Primário**: n8n **Wait node** agendado `response_window_seconds` após #5 abrir a rodada
   → dispara #8 ao expirar.
@@ -43,13 +55,14 @@
   Wait perdeu (n8n crash/restart). **Sem schema novo** (`expires_at` existe em 0023); sem
   pg_cron.
 
-## Route Handler contract surface (ADR-018 D5)
+## Route Handler contract surface (ADR-018 D5, alinhado Sessões 14-16)
 
-n8n chama estes endpoints; o backend mapeia cada um à RPC com o escopo correto. Os **5
-system-only** vão por Route Handlers system-scoped (Service Role interno) — nunca expostos
-ao n8n/IA direto.
+n8n chama estes endpoints; o backend mapeia cada um à RPC/service com o escopo correto.
+Os **5 system-only** vão por Route Handlers system-scoped (Service Role interno) — nunca
+expostos ao n8n/IA direto. `service_role` jamais no n8n (n8n autentica por
+`x-internal-api-key`, ADR-019 D3 / ADR-022 D4).
 
-| Endpoint | Escopo | RPC |
+| Endpoint | Escopo | RPC/service |
 |---|---|---|
 | `POST /api/internal/deliveries` | system | `create_delivery_request` |
 | `POST /api/internal/deliveries/{id}/enrich` | system | `GeocodingProvider.geocode` + validação |
@@ -57,12 +70,23 @@ ao n8n/IA direto.
 | `POST /api/internal/deliveries/{id}/confirm-quote` | user JWT ou system | `confirm_quote` |
 | `POST /api/internal/deliveries/{id}/dispatch/rounds` | system | `open_dispatch_round` |
 | `POST /api/internal/dispatch/rounds/{id}/close` | system | `select_winner_and_claim` |
-| `POST /api/offers/{id}/respond` | driver (signed link → JWT) | `respond_to_offer` |
-| `POST /api/internal/deliveries/{id}/transitions` | driver/admin/system (matriz ADR-016) | `transition_delivery` |
-| `POST /api/internal/deliveries/{id}/pod` | driver | `submit_proof_of_delivery` |
+| `POST /api/internal/deliveries/{id}/transitions` | system (path system) | `transition_delivery` (actor system) |
+| `POST /api/driver/deliveries/{id}/transitions` | driver (cookie JWT, ADR-020 D1) | `transition_delivery` (actor driver) |
 | `POST /api/internal/deliveries/{id}/confirm` | system | `confirm_delivery` |
-| `POST /api/internal/deliveries/{id}/otp` | system | `generate_delivery_otp` |
-| `POST /api/webhooks/datacrazy` | público c/ signature | router inbound |
+| `POST /api/internal/deliveries/{id}/otp` | system (**geração-only**, redact `otp_code`, ADR-021 D7) | `generate_delivery_otp` — n8n **não** usa (ver #11) |
+| `POST /api/internal/notifications/send` | system (ADR-021 D2) | `sendNotification` (provider híbrido + `notifications`) |
+| `POST /api/internal/reconciler/scan` | system, read-only (ADR-021 D5) | `scanReconciler` (state-based) |
+| `POST /api/internal/offers/{id}/respond-link` | system (gerador, ADR-020 D4) | signed link generator (chamado internamente por `notifications/send`) |
+| `POST /api/offers/{id}/respond` | driver (dual cookie-ou-token, ADR-020 D1) | `respond_to_offer` |
+| `POST /api/driver/deliveries/{id}/pod` | driver (cookie JWT, ADR-020 D1) | `submit_proof_of_delivery` |
+| `POST /api/driver/availability` | driver (cookie JWT) | `set_driver_availability` |
+| `POST /api/webhooks/datacrazy` | público c/ signature HMAC (ADR-020 D5) | router inbound (signature+dedup+route) |
+
+> **Outbound WhatsApp** (#6/#10/#11/#12): n8n **não** envia direto nem gera signed link
+> — chama `POST /api/internal/notifications/send` com `{type, offer_id?, delivery_id?}`
+> e o backend resolve destinatário, gera o link (se `offer`), escolhe provider híbrido
+> (DataCrazy nativo + Evolution fallback, ADR-021 D1), envia e loga em `notifications`
+> (idempotente). Segredos ficam no backend.
 
 ## Idempotência (R17 — ADR-018 D6, não misturar)
 
@@ -98,8 +122,12 @@ ao n8n/IA direto.
 
 ### Workflow #1 — nova solicitação recebida
 
-- **Trigger:** webhook HTTP — DataCrazy (#16 encaminha após IA estruturar o pedido) ou
-  dashboard do business. Origem `whatsapp` ou `integration`.
+> **Backend router (n8n não está no inbound — ADR-022 D8).** A criação é feita pelo
+> backend; o n8n **reage** em #2 ao `delivery_created`.
+
+- **Trigger:** backend — DataCrazy inbound → router `/api/webhooks/datacrazy` (após a IA
+  estruturar o pedido) **ou** dashboard do business → Server Action. Ambos chamam a RPC
+  de criação (backend interno, `service_role`). Origem `whatsapp` ou `integration`.
 - **Input:** `organization_id`, `business_id`, `business_location_id`, endereços/contatos
   de coleta e entrega, `vehicle_required`, `priority`, `scheduled_at`, `external_reference`,
   `items`, `notes`, `instructions`, `correlation_id`.
@@ -127,7 +155,8 @@ ao n8n/IA direto.
 
 ### Workflow #2 — enriquecimento/geocodificação
 
-- **Trigger:** Realtime `delivery_created` (filtro `event_type='delivery_created'`).
+- **Trigger:** Database Webhook `delivery_created` (Switch
+  `record.event_type='delivery_created'`).
 - **Input:** `delivery_request_id`, `correlation_id` (do evento).
 - **Validações:** delivery em `draft`; pontos ainda não enriquecidos (idempotência — se já
   enriquecido, no-op).
@@ -140,7 +169,7 @@ ao n8n/IA direto.
 - **Chamadas ao backend:** `POST /api/internal/deliveries/{id}/enrich`.
 - **Eventos gerados:** nenhum novo (enriquecimento é preparação; não transita estado).
 - **Retries:** backoff exponencial; falha de provider → DLQ; reconciler reprocessa drafts
-  sem enrich (D2).
+  sem enrich (ADR-022 D6).
 - **Idempotency key:** estado (`draft` + já-enriquecido) + `Idempotency-Key`.
 - **Tratamento de erro:** endereço não encontrado/ambíguo → notifica business (#12) para
   corrigir; não avança para #3.
@@ -172,7 +201,7 @@ ao n8n/IA direto.
 
 ### Workflow #4 — início de dispatch
 
-- **Trigger:** Realtime `dispatch_started` (emitido por `confirm_quote` quando o business
+- **Trigger:** Database Webhook `dispatch_started` (emitido por `confirm_quote` quando o business
   confirma a cotação no dashboard — ADR-013 D1). n8n **reage**; **não** confirma.
 - **Input:** `delivery_request_id`, `correlation_id`.
 - **Validações:** delivery em `searching_driver`; sem rodada aberta (guard).
@@ -182,8 +211,8 @@ ao n8n/IA direto.
   searching_driver`.
 - **Chamadas ao backend:** nenhuma direta (delega a #5).
 - **Eventos gerados:** nenhum novo (o evento consumido é `dispatch_started`).
-- **Retries:** se #5 falhar, backoff; reconciler (D2) reprocessa `searching_driver` sem
-  rodada aberta.
+- **Retries:** se #5 falhar, backoff; reconciler (ADR-022 D6) reprocessa
+  `searching_driver` sem rodada aberta.
 - **Idempotency key:** estado (`searching_driver` + rodada aberta) — abrir rodada duplicada
   → `round_already_open`.
 - **Tratamento de erro:** params inválidos → loga + alerta; não abre rodada.
@@ -215,45 +244,56 @@ ao n8n/IA direto.
 
 ### Workflow #6 — envio de ofertas
 
-- **Trigger:** Realtime `offer_created` (por offer, filtro `event_type='offer_created'`).
-- **Input:** `delivery_offer_id`, `driver_id`, `round_id`, `correlation_id`.
-- **Validações:** offer válida e aberta; rodada ainda `open`; motorista elegível.
-- **Operações:** monta **payload de decisão** (região de coleta/destino, distância, veículo
-  requerido, valor ofertado `driver_offer_cents`, prazo — **sem PII do cliente antes da
-  atribuição**, ADR-017/D10); gera **link assinado+expirável** com ações
-  ACEITAR / FAZER LANCE / RECUSAR → `POST /api/offers/{id}/respond`; envia via
-  DataCrazy/WhatsApp ao motorista.
-- **Chamadas ao backend:** nenhuma mutante (envio é mensageria via DataCrazy). O link aponta
-  para `POST /api/offers/{id}/respond` (#7).
-- **Eventos gerados:** nenhum novo pelo envio em si (a notificação é logada).
-- **Retries:** falha de DataCrazy → backoff; não reenviar duplicado.
-- **Idempotency key:** `notifications.idempotency_key` (não re-enviar em retry — mesmo
-  motorista+offer).
-- **Tratamento de erro:** DataCrazy indisponível → backoff; após N → DLQ + alerta (#12);
-  offer expirada/rodada fechada → não envia.
+- **Trigger:** Database Webhook `offer_created` (Switch `record.event_type='offer_created'`).
+- **Input:** `delivery_offer_id`, `driver_id`, `round_id`, `correlation_id` (do evento).
+- **Validações:** offer válida e aberta; rodada ainda `open` (idempotência — segundo trigger
+  da mesma offer → no-op).
+- **Operações:** chama `POST /api/internal/notifications/send` (system) com
+  `{type:'offer', offer_id}`. O **backend** resolve offer+driver+delivery, **gera o signed
+  link** (`createActionLink`, TTL = restante até `delivery_offers.expires_at`, clamp
+  60..900, ADR-020 D3), monta a **mensagem de decisão** (região de coleta/destino, distância,
+  veículo, valor `driver_offer_cents`, prazo + link — **sem PII do cliente antes da
+  atribuição**, ADR-018 D10), escolhe provider híbrido (ADR-021 D1), envia ao motorista
+  (`drivers.phone`) e loga em `notifications`. n8n **não** gera o link nem envia direto.
+- **Chamadas ao backend:** `POST /api/internal/notifications/send` (`Idempotency-Key:
+  {correlation}-offer-{offer_id}`).
+- **Eventos gerados:** nenhum novo pelo envio em si (a notificação é logada em `notifications`).
+- **Retries:** falha de provider → backoff; `releaseClaim` libera a claim p/ retry
+  re-executar (ADR-021 D2 fix). Não reenviar duplicado (`notifications.idempotency_key`).
+- **Idempotency key:** `notifications.idempotency_key` = `notif:offer:{offer_id}` (upsert
+  ignore-duplicates) + `Idempotency-Key` header (retry dedup, R17).
+- **Tratamento de erro:** provider 501 (`whatsapp_provider_not_configured`) → backoff +
+  DLQ após N + alerta (#12); offer expirada/rodada fechada → não envia (backend retorna
+  reason).
 - **Logs:** `correlation_id`, `delivery_offer_id`, `driver_id`, `round_id`, canal,
   resultado. **Sem PII do cliente.**
 
 ### Workflow #7 — recebimento de respostas
 
-- **Trigger:** inbound — motorista clica no link assinado (webhook HTTP de DataCrazy ou app
-  driver).
-- **Input:** `delivery_offer_id`, `driver_id`, `response_type` (`accept`|`counter_bid`|
-  `decline`), `bid_amount_cents` (se counter_bid), `idempotency_key`, `correlation_id`.
+- **Trigger:** inbound — motorista clica no **signed link** (HMAC, ADR-020 D3) →
+  `POST /api/offers/{id}/respond` (driver-facing, **dual auth cookie-ou-token**, ADR-020
+  D1). O link é gerado pelo backend em #6 (`notifications/send`); o motorista vem por
+  WhatsApp (sem cookie) usando o token do link, ou pelo app driver (cookie JWT).
+- **Input:** `delivery_offer_id`, `driver_id` (resolvido do token/cookie, **não** do
+  body), `response_type` (`accept`|`counter_bid`|`decline`), `bid_amount_cents` (se
+  counter_bid), `idempotency_key`, `correlation_id`.
 - **Validações:** offer existe e não expirada; rodada aberta; motorista é o dono da offer
-  (resolvido pelo backend via JWT do link assinado).
-- **Operações:** chama `POST /api/offers/{id}/respond` (driver, user JWT do link). O Route
-  Handler chama `respond_to_offer(p_delivery_offer_id, p_driver_id, p_response_type,
+  (IDOR `o===offerId` + timing-safe, ADR-020 D3 — resolvido no backend, não confia no
+  client).
+- **Operações:** chama `POST /api/offers/{id}/respond` (driver, dual). O Route Handler
+  chama `respond_to_offer(p_delivery_offer_id, p_driver_id, p_response_type,
   p_bid_amount_cents, p_idempotency_key, p_correlation_id) → (ok, reason, bid_id)`.
   Driver-scoped. **Não atribui** — ACEITAR ≠ GANHAR (ADR-006). Emite `offer_accepted` /
-  `counter_bid_received` / `offer_declined`.
-- **Chamadas ao backend:** `POST /api/offers/{id}/respond`.
+  `counter_bid_received` / `offer_declined` (que disparam DB Webhooks → #12).
+- **Chamadas ao backend:** `POST /api/offers/{id}/respond` (n8n **não** chama — é o
+  motorista; o n8n reage ao `offer_*` event via DB Webhook em #12).
 - **Eventos gerados:** `offer_accepted` / `counter_bid_received` / `offer_declined`.
 - **Retries:** backoff exponencial; DLQ após N.
 - **Idempotency key:** `p_idempotency_key` — uma resposta válida por (offer, driver);
   duplicata retorna o resultado original.
-- **Tratamento de erro:** offer expirada → backend retorna reason; notifica motorista. Já
-  atribuída (concorrente) → backend trata; n8n no-op.
+- **Tratamento de erro:** offer expirada → backend retorna reason (410); notifica
+  motorista. Já respondida → `offer_already_responded` (409, no-op). Já atribuída
+  (concorrente) → backend trata; n8n no-op.
 - **Logs:** `correlation_id`, `delivery_offer_id`, `driver_id`, `response_type`,
   `bid_amount_cents` (se lance), resultado. **Sem PII do cliente.**
 
@@ -271,14 +311,21 @@ ao n8n/IA direto.
   (responded + ainda-eligible), escolhe vencedor (tie-break determinístico) e chama
   `claim_delivery` **atomicamente** na mesma transação (GATE Sessão 10). Emite
   `round_closed` + `winner_selected` + `driver_assigned` (se won).
-- **Chamadas ao backend:** `POST /api/internal/dispatch/rounds/{id}/close`.
-- **Eventos gerados:** `round_closed`, `winner_selected`, `driver_assigned` (won) — pela
-  RPC; `assignment_superseded` se aplicável.
-- **Retries:** `round_not_open` → no-op (idempotente); falha transitória → backoff.
+- **Chamadas ao backend:** `POST /api/internal/dispatch/rounds/{id}/close`
+  (`Idempotency-Key: {correlation}-close-{round_id}`).
+- **Eventos gerados:** `round_closed` (sempre — com `metadata.reason` = `won`/`no_candidates`/
+  `superseded_by_concurrent_claim`), `winner_selected` + `driver_assigned` (se won) — pela
+  RPC. `superseded_by_concurrent_claim` é **metadata.reason do evento `round_closed`**,
+  não um event_type nem o retorno HTTP.
+- **Retries:** `round_not_open` → no-op (idempotente); falha transitória → backoff
+  (`releaseClaim` libera a claim, ADR-021 D2).
 - **Idempotency key:** estado da rodada (`open`→`closed`) — `round_not_open` guarda
   re-close.
 - **Tratamento de erro:** resultado `won` → #10. `no_candidates` → #9 (nova rodada).
-  `superseded_by_concurrent_claim` → ignora (alguém já ganhou). `not_authorized` → alerta.
+  `already_assigned`/`not_searching_driver`/`delivery_not_found` (race de outra
+  rodada já ganhou — RPC 0024:209 retorna o `claim_reason`; emite `round_closed` com
+  metadata `superseded_by_concurrent_claim`) → ignora. `round_not_open` → no-op.
+  `not_authorized` → alerta.
 - **Logs:** `correlation_id`, `dispatch_round_id`, resultado, `winner_driver_id` (se won).
   Scores no `metadata` do evento (não em coluna — ADR-014 D6).
 
@@ -296,7 +343,7 @@ ao n8n/IA direto.
   metadata, p_correlation_id)`.
 - **Eventos gerados:** `expired` (se exaurido) — pela RPC.
 - **Retries:** se #5 falhar, backoff; reconciler reprocessa `searching_driver` sem rodada
-  aberta (D2).
+  aberta (ADR-022 D6).
 - **Idempotency key:** `round_already_open` (não abre sobreposta) + estado da corrida.
 - **Tratamento de erro:** entrega já `assigned` (concorrente) → no-op.
 - **Logs:** `correlation_id`, `delivery_request_id`, `round_number`, próximos params ou
@@ -304,78 +351,96 @@ ao n8n/IA direto.
 
 ### Workflow #10 — atribuição confirmada
 
-- **Trigger:** Realtime `driver_assigned` (emitido por `claim_delivery` dentro do SWAC).
-- **Input:** `delivery_request_id`, `winner_driver_id`, `correlation_id`.
-- **Validações:** delivery em `assigned`; notificação ainda não enviada (idempotência).
-- **Operações:** notifica o motorista (detalhes completos da corrida + **PII liberada
-  pós-atribuição** — endereços, contatos) e o business; via #12. **Default: OTP em
+- **Trigger:** Database Webhook `driver_assigned` (Switch
+  `record.event_type='driver_assigned'`; emitido por `claim_delivery` dentro do SWAC).
+- **Input:** `delivery_request_id`, `winner_driver_id`, `correlation_id` (do evento).
+- **Validações:** delivery em `assigned`; notificação ainda não enviada (idempotência —
+  segundo trigger → no-op).
+- **Operações:** chama `POST /api/internal/notifications/send` (system) com
+  `{type:'assignment', delivery_id}`. O backend resolve a assignment ativa + **PII
+  liberada pós-atribuição** (endereços, contatos), monta a mensagem completa da corrida
+  ao motorista + ao business, escolhe provider híbrido, envia e loga. **Default: OTP em
   `in_transit`** (não aqui) — este workflow **não** gera OTP no assignment (alternativa
-  "OTP no assignment" fica desativada no MVP).
-- **Chamadas ao backend:** nenhuma mutante (a transição já foi feita pelo SWAC).
+  "OTP no assignment" desativada no MVP).
+- **Chamadas ao backend:** `POST /api/internal/notifications/send`
+  (`Idempotency-Key: {correlation}-assignment-{delivery_id}`). Nenhuma mutante de estado
+  (a transição já foi feita pelo SWAC).
 - **Eventos gerados:** nenhum novo (consome `driver_assigned`).
-- **Retries:** falha de notificação → backoff via #12.
-- **Idempotency key:** estado (`assigned` once) + `notifications.idempotency_key`.
-- **Tratamento de erro:** DataCrazy indisponível → #12 backoff; entregador já notificado →
-  no-op.
+- **Retries:** falha de provider → backoff (`releaseClaim`); após N → DLQ + alerta (#12).
+- **Idempotency key:** `notifications.idempotency_key` = `notif:assignment:{delivery_id}`
+  + `Idempotency-Key` header.
+- **Tratamento de erro:** provider indisponível → backoff; já notificado → no-op (replay).
 - **Logs:** `correlation_id`, `delivery_request_id`, `winner_driver_id`, destinatários.
 
 ### Workflow #11 — atualizações da corrida
 
-- **Trigger:** Realtime `driver_to_pickup` / `arrived_at_pickup` / `picked_up` /
+- **Trigger:** Database Webhook `driver_to_pickup` / `arrived_at_pickup` / `picked_up` /
   `in_transit` (transições driver-initiated via app → `transition_delivery`
   driver-scoped — #11 **reage**, não faz a transição).
-- **Input:** `delivery_request_id`, `event_type`, `correlation_id`.
+- **Input:** `delivery_request_id`, `event_type`, `correlation_id` (do evento).
 - **Validações:** evento corresponde ao estado atual da corrida (idempotência — segundo
   trigger do mesmo evento → no-op).
 - **Operações:**
-  - notifica partes relevantes via #12 (business/motorista conforme o evento);
-  - em `in_transit` → dispara **OTP-send**: chama `POST /api/internal/deliveries/{id}/otp`
-    (system) → `generate_delivery_otp(p_delivery_request_id, p_ttl_seconds,
-    p_max_attempts, p_correlation_id) → (ok, reason, otp_code)`. System-only (5º). O
-    **plaintext do OTP** vai só ao DataCrazy (→ recebedor via WhatsApp); no banco só o
-    hash salt+sha256 (ADR-017 D1). Emite `otp_generated`.
-- **Chamadas ao backend:** `POST /api/internal/deliveries/{id}/otp` (OTP-send em
-  `in_transit`).
-- **Eventos gerados:** `otp_generated` (pela RPC, no OTP-send).
-- **Retries:** backoff exponencial; DLQ após N.
-- **Idempotency key:** estado da corrida + OTP upsert (unique `delivery_request_id` em
-  `delivery_otps`).
-- **Tratamento de erro:** `not_authorized`/OTP lockout → alerta (#12); não bloqueia a
+  - notifica partes relevantes: chama `POST /api/internal/notifications/send` (system)
+    com `{type:'status_update', delivery_id}` → backend notifica business/motorista
+    conforme o evento (escolhe provider, loga).
+  - em `in_transit` → dispara **OTP-send ao recebedor**: chama
+    `POST /api/internal/notifications/send` (system) com `{type:'otp', delivery_id}`. O
+    backend chama `generate_delivery_otp` **internamente** (plaintext `otp_code` fica no
+    backend), monta a mensagem ao recebedor (`delivery_contact_phone`), envia via provider
+    híbrido e loga em `notifications` (só metadados). **Response `{ok, reason}` sem
+    `otp_code`** (ADR-021 D7). Emite `otp_generated`. **n8n NÃO chama
+    `/api/internal/deliveries/{id}/otp`** (geração-only, redact; ver ADR-022 D5) — o
+    plaintext nunca transita pelo n8n.
+- **Chamadas ao backend:** `POST /api/internal/notifications/send` (status_update e, em
+  `in_transit`, otp).
+- **Eventos gerados:** `otp_generated` (pela RPC dentro de `notifications/send`, no
+  OTP-send em `in_transit`).
+- **Retries:** backoff exponencial; `releaseClaim` em falha transitória (provider 501);
+  DLQ após N.
+- **Idempotency key:** `notifications.idempotency_key` = `notif:otp:{delivery_id}` (OTP,
+  unique) / `notif:status_update:{delivery_id}:{status}` + `Idempotency-Key` header
+  (`{correlation}-{op}`, R17).
+- **Tratamento de erro:** provider 501/lockout → backoff + alerta (#12); não bloqueia a
   transição (que já ocorreu).
 - **Logs:** `correlation_id`, `delivery_request_id`, `event_type`, resultado. **Nunca
   logar o plaintext do OTP.**
 
 ### Workflow #12 — notificações
 
-- **Trigger:** dispatcher event-driven — Realtime em eventos relevantes
-  (`driver_assigned`, `driver_to_pickup`, `picked_up`, `in_transit`, `delivered`,
-  `cancelled`, `failed`, `expired`, etc.) **e** invocado por outros workflows em erro.
-- **Input:** `delivery_request_id`, `event_type`, destinatários, `correlation_id`.
-- **Validações:** destinatário certo por evento (business/motorista/recebedor); canal
-  certo (DataCrazy/WhatsApp p/ motorista+recebedor, dashboard/WhatsApp p/ business).
-- **Operações:** seleciona template por evento+destinatário; monta mensagem (PII
-  minimizada — ADR-018 D10); envia via DataCrazy/WhatsApp; loga em `notifications`
-  (`idempotency_key`).
-- **Chamadas ao backend:** nenhuma mutante (mensageria).
+- **Trigger:** Database Webhook em eventos relevantes (`delivered`, `cancelled`,
+  `failed`, `expired`, `offer_accepted`/`counter_bid_received`/`offer_declined`,
+  etc.) **e** invocado por outros workflows em erro. (#6/#10/#11 enviam suas próprias
+  notificações via `notifications/send`; #12 cuida dos terminais/status genéricos.)
+- **Input:** `delivery_request_id`, `event_type`, `correlation_id` (do evento).
+- **Validações:** destinatário certo por evento (business/motorista/recebedor);
+  idempotência (segundo trigger → no-op).
+- **Operações:** chama `POST /api/internal/notifications/send` (system) com
+  `{type:'terminal'|'status_update', delivery_id}` (+ `status` se aplicável). O backend
+  seleciona destinatário/template por evento (PII minimizada — ADR-018 D10), escolhe
+  provider híbrido, envia e loga em `notifications`. n8n não envia direto.
+- **Chamadas ao backend:** `POST /api/internal/notifications/send`.
 - **Eventos gerados:** nenhum (log de notificação).
-- **Retries:** falha de canal → backoff; após N → DLQ + alerta.
-- **Idempotency key:** `notifications.idempotency_key` (não re-enviar em retry).
-- **Tratamento de erro:** canal indisponível → backoff; destinatário sem contato → loga +
-  alerta admin.
+- **Retries:** falha de provider → backoff (`releaseClaim`); após N → DLQ + alerta.
+- **Idempotency key:** `notifications.idempotency_key` = `notif:{type}:{delivery_id}[:{status}]`
+  + `Idempotency-Key` header.
+- **Tratamento de erro:** provider indisponível → backoff; destinatário sem contato →
+  loga + alerta admin.
 - **Logs:** `correlation_id`, `delivery_request_id`, destinatário, canal, template,
   resultado. PII mínima.
 
 ### Workflow #13 — entrega concluída
 
-> Design Sessão 12 (ADR-017 D6); formalizado no template Sessão 13. Implementação live
-> Sessão 14.
+> Design Sessão 12 (ADR-017 D6); formalizado no template Sessão 13; trigger model
+> revisado Sessão 16 (ADR-022). Implementação live Phase 2 (n8n provisionado).
 
 **Objetivo:** auto-confirmar a entrega quando o driver submete o POD de delivery, sem que
 o driver ou o frontend marquem `delivered`. Honra o two-phase POD (Sessão 11/12):
 **submeter POD ≠ entregue** — o sistema confirma.
 
-- **Trigger:** Realtime `pod_submitted` (filtro `event_type='pod_submitted' and
-  metadata->>'pod_type'='delivery'`). Reconciler captura `pod_submitted` perdido (D2).
+- **Trigger:** Database Webhook `pod_submitted` (Switch
+  `record.event_type='pod_submitted' and metadata->>'pod_type'='delivery'`). Reconciler
+  captura `pod_submitted` perdido (D6).
   Idempotente por `external_event_id`/`idempotency_key`.
 - **Input:** `delivery_request_id`, `pod_id`, `correlation_id`.
 - **Validações:** delivery em `in_transit` (senão ignora/sai — já confirmada ou
@@ -408,16 +473,17 @@ o driver ou o frontend marquem `delivered`. Honra o two-phase POD (Sessão 11/12
 - **Logs:** `correlation_id`, `delivery_request_id`, `pod_id`, `geo_tolerance_m`,
   resultado. **Sem plaintext de OTP** (já consumido, só hash no banco).
 
-**Dependência externa:** o envio do OTP ao recebedor (workflow #11 em `in_transit`, via
-WhatsApp/DataCrazy — `docs/DATACRAZY_INTEGRATION.md` seção receiver-OTP, Sessões 15-16)
+**Dependência externa:** o envio do OTP ao recebedor (#11 em `in_transit`, via
+`POST /api/internal/notifications/send {type:'otp'}` → backend gera+envia, ADR-021 D2/D7)
 ocorre **antes** do submit. Sem OTP entregue, o driver não tem `otp_code` válido (mas
-foto-only ainda funciona).
+foto-only ainda funciona). O plaintext do OTP nunca transita pelo n8n (ADR-022 D5).
 
 ### Workflow #14 — falhas
 
-- **Trigger:** Realtime `cancelled` / `failed` / `expired` / `assignment_superseded` **e**
-  invocado por outros workflows em erro (`no_pricing_rule`, `max_rounds`, geo
-  out-of-range escalado, DLQ).
+- **Trigger:** Database Webhook `cancelled` / `failed` / `expired` (Switch
+  `record.event_type in ('cancelled','failed','expired')`) **e** invocado por outros
+  workflows em erro (`no_pricing_rule`, `max_rounds`, geo out-of-range escalado, DLQ).
+  (`assignment_superseded` **não é event_type** — é `metadata.reason` do `round_closed`.)
 - **Input:** `delivery_request_id`, `event_type` ou reason, `correlation_id`.
 - **Validações:** estado atual não-terminal (se já terminal → no-op).
 - **Operações:** classifica a falha; transita terminal se ainda não (`transition_delivery`
@@ -434,44 +500,54 @@ foto-only ainda funciona).
 
 ### Workflow #15 — retry/dead-letter + reconciler
 
-- **Trigger:** interno (n8n Error Trigger/ retry policy) **e** agendamento periódico
-  (cron node p/ reconciler).
-- **Input:** workflow/execution em falha (retry) **ou** varredura periódica (reconciler).
+- **Trigger:** interno (n8n Error Trigger / retry policy) **e** **Schedule Trigger**
+  (cron) p/ reconciler (ADR-022 D6).
+- **Input:** workflow/execution em falha (retry) **ou** resposta do scan (reconciler).
 - **Validações:**
   - retry: execução falhou < N vezes;
-  - reconciler: (a) `delivery_events` não-processados; (b) drafts sem quote; (c)
-    `searching_driver` sem rodada aberta e `round_count < max`; (d) rodadas `open` com
-    `expires_at < now()`.
+  - reconciler: chama `POST /api/internal/reconciler/scan` (system, read-only) — o
+    **backend** devolve **estado preso**: (a) rodadas `open` com `expires_at < now()`;
+    (b) drafts sem quote há > `stale_after_seconds`; (c) `searching_driver` sem rodada
+    aberta. **State-based, não event-based** — não rastreia "qual evento o n8n processou";
+    procura estado stuck e reage (sidestepa "evento perdido" do DB Webhook).
 - **Operações:**
   - **retry**: backoff exponencial (max N, ex.: 3-5); após N → dead-letter queue + alerta
     (#12). DLQ exige intervenção humana.
-  - **reconciler** periódico: reprocessa o workflow correspondente a cada achado — (a)
-    evento perdido → workflow do `event_type`; (b) → #3; (c) → #5/#9; (d) → #8.
-- **Chamadas ao backend:** nenhuma direta (delega aos workflows reprocessados); pode ler
-  estado via endpoint de consulta (read-only).
-- **Eventos gerados:** nenhum novo (reprocessa).
+  - **reconciler** periódico: reprocessa cada achado via Route Handlers — (a)→#8 (close),
+    (b)→#3 (quote), (c)→#5/#9 (abrir/expandir rodada). n8n **não query o DB direto**
+    (regra mestra).
+- **Chamadas ao backend:** `POST /api/internal/reconciler/scan` (scan) + os endpoints
+  dos workflows reprocessados. Sem `Idempotency-Key` no scan (ledger `skip` → re-query
+  sempre; cachear scan seria stale).
+- **Eventos gerados:** nenhum novo (reprocessa; os workflows reprocessados geram).
 - **Retries:** o próprio retry é este workflow; DLQ é terminal aqui.
 - **Idempotency key:** idempotência (D6) garante que retry/reprocess **não duplique
-  efeito** — `external_event_id`/estado/`Idempotency-Key`.
+  efeito** — estado/`Idempotency-Key` ({correlation}-{op}, R17).
 - **Tratamento de erro:** reprocessar workflow que falha repetidamente → DLQ + alerta
   humano.
 - **Logs:** `correlation_id`, workflow, reason, tentativa, achados do reconciler.
 
 ### Workflow #16 — webhooks DataCrazy
 
-- **Trigger:** inbound HTTP de DataCrazy/WhatsApp (`POST /api/webhooks/datacrazy`).
+> **Backend router (n8n não está no inbound — ADR-022 D8).** O router do backend
+> (`/api/webhooks/datacrazy`) é o entrypoint; n8n reage aos eventos emitidos.
+
+- **Trigger:** inbound HTTP de DataCrazy/WhatsApp (`POST /api/webhooks/datacrazy` —
+  backend, ADR-020 D5: signature HMAC + dedup `webhook_events.external_id` + route + 200).
 - **Input:** payload DataCrazy (intent estruturado pela IA ou mensagem crua),
   `external_event_id`, signature.
 - **Validações:** verifica signature; dedup via `webhook_events.external_id`
   (`external_event_id`); payload bem-formado.
 - **Operações:** dedup; parse de intent (IA já estruturou, ou mensagem crua → IA para
-  interpretar); roteia:
-  - nova solicitação → #1;
-  - resposta de motorista (clique em link) → #7;
-  - confirmação de OTP-send / outro intent → workflow correspondente;
+  interpretar); roteia **a endpoints backend** (n8n reage aos eventos emitidos):
+  - nova solicitação → `POST /api/internal/deliveries` (backend cria) → `delivery_created`
+    → n8n #2;
+  - resposta de motorista (clique em signed link) → `POST /api/offers/{id}/respond`
+    (driver) → `offer_*` → n8n #12;
+  - confirmação de OTP-send / outro intent → endpoint correspondente;
   - intent desconhecido → IA re-pergunta ao usuário **ou** DLQ.
 - **Chamadas ao backend:** `POST /api/webhooks/datacrazy` (router) → roteia aos endpoints
-  de #1/#7/etc.
+  de criação/resposta/etc. (backend); n8n reage via DB Webhook.
 - **Eventos gerados:** nenhum (inbound router).
 - **Retries:** backoff; payload inválido → DLQ.
 - **Idempotency key:** `webhook_events.external_id` (inbound reprocessado dedup).
@@ -482,17 +558,20 @@ foto-only ainda funciona).
 
 ---
 
-## Caminho feliz (a construir primeiro na Sessão 14)
+## Caminho feliz (a construir primeiro na Phase 2 — ADR-022)
 
 ```
-delivery_created(#1) → enrich(#2) → quote(#3) → dispatch_started(#4) →
-open_round(#5) → send_offers(#6) → [driver accepts #7] → timeout/close+SWAC(#8: won) →
-driver_assigned(#10) → updates(#11: in_transit → OTP-send) → pod_submitted(#13: confirm) →
-delivered
+[backend cria: router/Server Action #1] → delivery_created → enrich(#2) → quote(#3) →
+dispatch_started(#4) → open_round(#5) → offer_created → send_offers(#6: notifications/send
+type:offer) → [driver aceita #7: /api/offers/{id}/respond] → round_closed(#8: won via
+SWAC) → driver_assigned(#10: notifications/send type:assignment) → in_transit(#11:
+notifications/send type:otp + status_update) → pod_submitted(#13: /confirm) → delivered
 ```
 
-Depois: timeout sem vencedor (#8 → #9 → #5), rejeições, erros, indisponibilidade,
-reatribuição, terminais (#14), retry/reconciler (#15).
+Cada seta `event_type` é um DB Webhook → Switch → Execute Sub-workflow. `notifications/send`
+é o único canal outbound (backend envia+loga; n8n só dispara). Depois: timeout sem
+vencedor (#8 → #9 → #5), rejeições, erros, indisponibilidade, reatribuição, terminais
+(#14), retry/reconciler (#15: `/reconciler/scan`).
 
 ## Logging
 
@@ -502,7 +581,10 @@ logs. Eventos críticos carregam `correlation_id`, `organization_id`,
 recebedor só no envio do OTP; **nunca** logar plaintext do OTP; **sem PII do cliente** nas
 ofertas antes da atribuição.
 
-## Registro final (Sessão 14)
+## Registro final (Phase 2 — Sessão 16 live)
 
-Ao concluir, documentar aqui: ID/nome/função de cada workflow provisionado, credenciais
-referenciadas (sem secrets), versões.
+Ao concluir a Phase 2 (n8n provisionado pelo usuário: URL + Public API key + versão),
+documentar aqui: ID/nome/função de cada workflow importado, credencial `httpHeaderAuth`
+do DB Webhook (sem secrets), versão do n8n, webhook Supabase criado (table
+`delivery_events`, event INSERT), e resultado da validação live do caminho feliz.
+**Não simulado** (regra mestra).

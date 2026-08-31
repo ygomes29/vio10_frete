@@ -6,6 +6,52 @@
 
 ## Histórico
 
+### Sessão 15 — Endpoints driver/user-facing, signed links, webhook router, cookie/middleware (ADR-020) — PASS
+
+- **ADR-020** escrito como spec (D1-D10) antes do código. Camada de aplicação **pura** —
+  sem migration/RPC/grant novo (os 4 RPCs driver-facing são finais desde Sessões 09-12).
+  Fecha a contract surface do ADR-018 D5 e a ressalva de Sessão 14/ADR-019 D7.
+- **Regra mestra preservada**: `service_role` nunca vaza ao client/n8n/IA/DataCrazy —
+  signed link system-scoped só p/ `respond_to_offer`; webhook só escreve `webhook_events`
+  (service-only) + chama services; endpoints user-facing usam client user-scoped (cookie).
+  ACEITAR ≠ GANHAR (respond não atribui; SWAC decide) + Submete POD ≠ entregue preservados.
+- **Fronteiras de auth/secrets verificadas**:
+  - **Signed link fail-closed** (D3): `verifyActionLink` retorna `null` se
+    `ACTION_LINK_SIGNING_SECRET` ausente (não forjável por falta de config); timing-safe;
+    IDOR (`o===expectedOfferId`); exp checado. Testes: expired/tampered/malformed/IDOR.
+  - **Dual-auth `/respond`** (D1): cookie primeiro (user-scoped), token fallback
+    (system-scoped), nenhum → 401. `driver_id` do token (não do body) no modo token.
+  - **Webhook signature fail-closed** (D5): `verifyDatacrazySignature` retorna `false` se
+    `DATACRAZY_WEBHOOK_SECRET` ausente; timing-safe; header ausente → 401; duplicado → 200
+    no-op via `webhook_events` dedup; erro de roteamento → 200 `routed_with_error`
+    (reconciler backstop — webhooks não dependem de parsing caro).
+  - **`set_driver_availability` void+raise** (D2): mapeado p/ 403 (não crash);
+    `resolveDriverId` RLS self; não-driver → 403.
+  - **Idempotência correta** (D7): `respond_to_offer` idempotência interna (`(offer,driver)`
+    unique) — não usa ledger; `submit_pod`/`transition`/`availability` via unique/máquina de
+    estados; webhook via `webhook_events` (não `integration_events`). `correlation_id` só log.
+  - **Middleware** (D6): refresh via `setAll`→response.cookies (cookie chega ao browser);
+    protege route groups sem vazar `/api/*` (handlers fazem auth própria).
+- **Bugs encontrados em revisão e corrigidos** (antes da validação live):
+  - `lib/api/webhook-handler.ts` `const client = createSystemClient()` inferia row-type
+    `never` (ReturnType do `createClient` mais estrito que `SupabaseClient<any>`) → anotado
+    `const client: SupabaseClient` (igual ao `client: SupabaseClient` do ledger.ts), `.from()`
+    permissivo restaurado.
+  - Handlers de teste com `vi.fn(async () => OK)` (sem params) → `.mock.calls[0][1]` tipava
+    `[]` → params tipados explicitamente (`(_c: string, input: {...}) => OK`).
+- **Testes unitários** vitest **124/124 PASS** (12 suítes — 81 novos + 43 Sessão 14):
+  signed-link (create/verify/IDOR/expirado/tampered/fail-closed), user-handler (401/ok/
+  validate/json inválido/500/status explícito), offer-respond (cookie/token/IDOR/expirado/
+  tampered/header/validate/409/500), webhook-auth (válida/inválida/fail-closed/comprimento),
+  webhook-handler (signature/dedup/external_id/json/processed/failed/routed_with_error),
+  driver validators, result extensions. `tsc --noEmit` clean.
+- **Ressalvas (declarado, não PASS — regra mestra)**: UI PWA/dashboards/portal (Sessões
+  17-19), DataCrazy/WhatsApp outbound real (Sessão 16), provider Google Maps (Sessão 20 —
+  `/quote`+`/enrich` 501), Storage RLS comportamental (Sessões 17-19), rate limiting/mTLS/
+  rotação de secret (Sessão 22/26), n8n implementação live (Sessão 16 + reabertura n8n).
+- **D4 do Achado Sessão 10** (lock-ordering `claim_delivery`↔SWAC): dívida técnica
+  observada, hardening adiado — não-hazard vivo (claim só roda dentro de SWAC). Mantido aberto.
+
 ### Sessão 14 — Camada de API: Next.js Route Handlers (pivot n8n → API layer, ADR-019) — PASS
 
 - **ADR-019** escrito como spec (D1-D9) antes da validação live. Route Handler é fino;

@@ -623,3 +623,85 @@ Regressão 10/10 suítes PASS no dev (pós reset+replay 0001→0028). Vertical s
 POD → confirm `delivered`. Idempotência: replay com mesmo `Idempotency-Key` → mesmo
 `delivery_request_id`, **0 duplicação**, `integration_events` gravado. Internal-auth
 fail-closed (401 sem secret). **Não simulado** (regra mestra).
+
+## 11. Endpoints driver/user-facing, signed links, webhook router, cookie/middleware (Sessão 15, ADR-020)
+
+Camada de aplicação **pura** — sem migration/RPC/grant novo (os 4 RPCs driver-facing são
+finais desde Sessões 09-12). Reusa a fundação Sessão 14 (clients, internal-auth, callRpc,
+toApiResponse, idempotency ledger). Fecha a contract surface do ADR-018 D5.
+
+### 11.1 Dois modos de auth (ADR-020 D1)
+
+- **Cookie JWT** (PWA logado): `handleUserPost` → `createServerClient()` (cookie) →
+  `getUser()` → **401 se null** → validate → `opts.run(correlationId, body, {user, client})`.
+  RPC roda **user-scoped** (`auth.uid()`=driver; resolve ator + posse internamente). Sem
+  ledger (D7). Usado em transitions driver, pod, availability, e o respond logado.
+- **Signed link HMAC** (WhatsApp, sem login): `handleOfferRespondPost` (dual-auth) — se
+  cookie ausente, lê `?token=` ou header `x-offer-token`, `verifyActionLink(token, offerId)`
+  verifica HMAC (timing-safe) + exp + IDOR (`o===path id`) → `respond_to_offer`
+  **system-scoped** (`auth.uid()` null, `p_driver_id` do token). Nem cookie nem token → 401.
+
+### 11.2 Signed links (D3/D4)
+
+`lib/auth/signed-link.ts`: `createActionLink({offerId,driverId,ttlSeconds?})`→
+`{token,expiresAt}`; `verifyActionLink(token,expectedOfferId?)`→`{offerId,driverId,exp}|null`.
+Token=`base64url(payload)."."base64url(hmac_sha256(payload))`, payload `{o,d,e,n}`. Secret
+`ACTION_LINK_SIGNING_SECRET` (**fail-closed**). TTL default 900s (janela da rodada). Generator
+em `POST /api/internal/offers/{id}/respond-link` (internal-auth, sem ledger — geração pura)
+→ `{token,url,expires_at}` (n8n #6 embute na mensagem). `NEXT_PUBLIC_APP_URL` é a base.
+
+### 11.3 Superfície de endpoints driver/user-facing (realização ADR-018 D5)
+
+| Endpoint | RPC | Auth | Scope |
+|---|---|---|---|
+| `POST /api/offers/{id}/respond` | `respond_to_offer` | dual cookie-ou-token | user ou system |
+| `POST /api/driver/deliveries/{id}/transitions` | `transition_delivery` (actor=driver) | cookie JWT | user |
+| `POST /api/driver/deliveries/{id}/pod` | `submit_proof_of_delivery` | cookie JWT (sensitive) | user |
+| `POST /api/driver/availability` | `set_driver_availability` (void+raise) | cookie JWT | user |
+| `POST /api/internal/offers/{id}/respond-link` | (gera signed link) | internal-auth | system |
+| `POST /api/webhooks/datacrazy` | roteia intents → services | signature HMAC | system |
+
+Driver só as 4 transições pós-`assigned` (`driver_to_pickup`, `at_pickup`, `picked_up`,
+`in_transit`); não pode `delivered`/`cancelled`/`failed`. `set_driver_availability` é
+**void + raise `'not_authorized'`** (não `returns table`) → service mapeia p/
+`RpcResult{ok:false,reason:'not_authorized'}`→403; `resolveDriverId(client,user.id)` resolve
+`drivers.id` de `auth.uid()` (RLS self); não-driver → 403. ACEITAR ≠ GANHAR (respond não
+atribui; SWAC decide). Submeter POD ≠ entregue (pod não transita; `confirm_delivery` sim).
+
+### 11.4 Webhook router DataCrazy (D5)
+
+`handleWebhookPost`: signature (HMAC-SHA256 raw body, `DATACRAZY_WEBHOOK_SECRET`,
+timing-safe, **fail-closed**) → `external_id` (`x-datacrazy-event-id`) obrigatório → dedup
+via `webhook_events (source='datacrazy',external_id)` upsert `ignoreDuplicates:true`
+(service-only) → parse intent → route (`offer_response`→respondToOffer, `new_request`→
+createDelivery, `otp_request`→generateOtp, desconhecido→throw) → **200 sempre** (erros
+logados + `webhook_events.status='failed'`; reconciler/DLQ backstop). Duplicado → 200
+`idempotent_replay`. DataCrazy/IA nunca escreve no banco — chama services (regra mestra).
+
+### 11.5 Cookie/middleware full (D6, ADR-010 D6)
+
+`lib/supabase/middleware-client.ts` (SEM `server-only`) — `createMiddlewareClient(request,
+response)`: `getAll` lê `request.cookies.getAll()`, `setAll` escreve `response.cookies.set()`.
+`middleware.ts` reescrito: `getUser()` dispara refresh (cookies novos na resposta via setAll)
+→ protege `/driver`,`/admin`,`/business` (sem sessão → 307 `/auth/login?redirect=`, validado live) →
+libera `/api/*`,`/auth/*`, estáticos (matcher). Placeholder `app/auth/login/page.tsx`
+(UI Sessões 17-19).
+
+### 11.6 Idempotência (D7) + mapeamento (D8)
+
+`respond_to_offer`: idempotência **interna** (`bids.idempotency_key`+`(offer,driver)` unique)
+— **não** usa ledger. `submit_pod`/`transition_delivery`/`set_availability`: sem
+idempotency_key param; idempotência via unique POD / máquina de estados / posse. Webhook:
+dedup via `webhook_events` (não `integration_events`). `reasonToStatus` estendido:
+`unauthenticated`→401, `offer_expired`→410, `offer_already_responded`/`delivery_not_searching`/
+`pod_already_submitted`/`invalid_transition`/`reassignment_limit_reached`/`otp_already_used`→409,
+`offer_not_found_for_driver`→404, `invalid_bid_amount`/`invalid_response_type`/`invalid_pod`→400.
+`set_driver_availability` raise `'not_authorized'`→403. Replay idempotente → 200.
+
+### 11.7 Validação real
+
+`tsc --noEmit` clean; **124/124** vitest PASS. Regressão DB 10/10 suítes (zero regressão).
+Live vertical slice `next dev`+curl (auth driver cookie, endpoints driver, 401 sem cookie,
+signed link generator+respond+expirado/tampered+replay, webhook signature/dedup/inválida,
+middleware redirect) — ver CHANGELOG. **Não simulado** (regra mestra). UI/WhatsApp outbound/
+Storage comportamental = **deferred** (Sessões 16-20).

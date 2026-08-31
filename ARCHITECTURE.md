@@ -233,4 +233,43 @@ permanecem a fonte da verdade; os Route Handlers são **HTTP wrappers finos** (B
 
 Endpoints driver/user-facing (`respond_to_offer`, `submit_proof_of_delivery`, transitions
 driver-side via JWT+signed links), webhook router DataCrazy e cookie/middleware full →
-**Sessão 15**.
+**Sessão 15 (ADR-020)**.
+
+## 15. Endpoints driver/user-facing + signed links + webhook + middleware (Sessão 15, ADR-020)
+
+Camada de aplicação **pura** — sem migration/RPC/grant novo. Fecha a contract surface do
+ADR-018 D5 (9 endpoints system/internal Sessão 14 + 6 driver/user-facing/webhook/generator).
+
+- **Dois modos de auth** (D1): **cookie JWT** (PWA, `handleUserPost`→`getUser`→401 se null,
+  RPC user-scoped, `auth.uid()`=driver) e **signed link HMAC** (WhatsApp, sem login,
+  `handleOfferRespondPost` dual-auth — token HS256 `{o,d,e,n}` assinado com
+  `ACTION_LINK_SIGNING_SECRET`, IDOR-protegido `o===path id`, → `respond_to_offer`
+  system-scoped com `p_driver_id` do token). `/api/offers/{id}/respond` aceita ambos.
+- **Service layer driver aceita `client`** (D2): handler decide user vs system scope;
+  `callRpc` é client-agnostic. `set_driver_availability` é void+raise `'not_authorized'`
+  (não `returns table`) → service mapeia p/ 403; `resolveDriverId` resolve `drivers.id`
+  de `auth.uid()` (RLS self).
+- **Signed links** (D3/D4): `lib/auth/signed-link.ts` HMAC-SHA256, TTL 900s, fail-closed.
+  Generator `POST /api/internal/offers/{id}/respond-link` (internal-auth, sem ledger) →
+  `{token,url,expires_at}` (n8n #6 embute na mensagem; `NEXT_PUBLIC_APP_URL` é a base).
+- **Webhook router DataCrazy** (D5): `POST /api/webhooks/datacrazy` — signature HMAC
+  (`DATACRAZY_WEBHOOK_SECRET`, timing-safe, fail-closed) → dedup `webhook_events
+  (source,external_id)` (service-only, `ignoreDuplicates`) → route intents
+  (`offer_response`/`new_request`/`otp_request`/desconhecido) → **200 sempre** (reconciler/
+  DLQ backstop). DataCrazy/IA nunca escreve no banco — chama services.
+- **Cookie/middleware full** (D6, ADR-010 D6): `lib/supabase/middleware-client.ts` (SEM
+  `server-only`) `setAll`→`response.cookies.set()` faz o refresh chegar ao browser;
+  `middleware.ts` `getUser()` refresca + protege `/driver`,`/admin`,`/business` (sem sessão
+  → 307 `/auth/login?redirect=`, validado live), libera `/api/*`,`/auth/*`, estáticos.
+- **Idempotência** (D7): `respond_to_offer` idempotência **interna** (`(offer,driver)`
+  unique) — não usa ledger; `submit_pod`/`transition`/`availability` via unique/máquina de
+  estados/posse; webhook via `webhook_events` (não `integration_events`).
+- **Mapeamento RPC→HTTP estendido** (D8): `unauthenticated`→401, `offer_expired`→410,
+  `offer_already_responded`/`invalid_transition`/...→409, `offer_not_found_for_driver`→404,
+  `invalid_bid_amount`/`invalid_response_type`/`invalid_pod`→400, `not_authorized`→403.
+- **service_role nunca vaza** (regra mestra íntegra): signed link system-scoped só p/
+  `respond_to_offer`; webhook só `webhook_events` (service-only) + services; user-facing
+  usa client user-scoped (cookie). ACEITAR ≠ GANHAR + Submete POD ≠ entregue preservados.
+- **Validação real** (não simulada): `tsc` clean, **124/124** vitest, regressão 10/10 suítes,
+  live `next dev`+curl. UI/WhatsApp outbound/Storage comportamental = **deferred**
+  (Sessões 16-20).

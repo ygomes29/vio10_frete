@@ -2,6 +2,115 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 16] — 2026-08-31 — WhatsApp outbound híbrido + n8n trigger model/contrato (ADR-021, ADR-022) — Phase 1 + design
+
+> **Phase 1 (backend outbound) concluída + design/contrato n8n.** Phase 2 (n8n live) blocked
+> em instância n8n provisionada pelo usuário. Decisões do usuário: D1 híbrido (DataCrazy
+> nativo + Evolution V2 fallback), D2 backend envia+loga, D3 backend é o único inbound.
+
+### Adicionado
+- **Migration 0029** (schema prep): `notifications.recipient_phone` + relax CHECK
+  `notifications_at_least_one_recipient_chk` (aceita `recipient_phone` p/ recebedor
+  externo) + tabela `whatsapp_conversations` (phone UNIQUE, conversation_id, provider,
+  window_expires_at, last_inbound_at; RLS default-deny; service_role all). **Sem
+  funções/RPCs/enums novos** (split respeitado).
+- **Provider abstraction WhatsApp** (copy do padrão geo ADR-005): interface
+  `WhatsAppProvider` + registry + `WhatsAppProviderNotConfiguredError` (501
+  `whatsapp_provider_not_configured` sem provider). `datacrazy-provider` (Bearer, exige
+  `conversationId`), `evolution-provider` (apikey, body nested+fallback flat #2570),
+  `hybrid-whatsapp-provider` (roteamento D1), `whatsapp-registration` (idempotente).
+- **`POST /api/internal/notifications/send`** (system, ADR-019 D1 pipeline +
+  `withIdempotency`): `{type:'offer'|'otp'|'assignment'|'status_update'|'terminal',
+  offer_id?, delivery_id?}`. `sendNotification` resolve destinatário, gera signed link
+  (offer), escolhe provider híbrido, envia, upsert em `notifications` (idempotente
+  `notif:{type}:{id}`); OTP gera+envia internamente (plaintext nunca sai). Erros
+  sanitizados (só status HTTP).
+- **`POST /api/internal/reconciler/scan`** (system, read-only, state-based):
+  `scanReconciler` devolve estado preso (rodadas `open` expiradas, drafts sem quote,
+  `searching_driver` sem rodada). Sem `Idempotency-Key` (ledger `skip`).
+- **`lib/api/webhook-conversation-capture.ts`**: upsert `whatsapp_conversations` no
+  inbound (best-effort, antes do roteamento).
+- **ADR-021** (D1-D7) + **ADR-022** (D1-D9, supersede ADR-018 D2: Realtime→Database
+  Webhooks). `N8N_WORKFLOWS.md` revisado (trigger model, tabela de endpoints, #6/#7/#8/
+  #10/#11/#12/#13/#15/#1/#16, caminho feliz).
+
+### Corrigido (bugs reais, achados+fixados+provados live)
+- **`withIdempotency` release-on-throw** (`lib/idempotency/ledger.ts`): `fn()` que lança
+  (provider 501/5xx) deixava a claim `pending` → retry com mesmo `Idempotency-Key` caía em
+  `in_flight` 409, envenenando a chave e bloqueando a retomada do n8n. Agora
+  `releaseClaim` deleta a claim e propaga a exceção. Distinção: lança=transitório/retryable,
+  retorna RpcResult=terminal/replayable. Provado live. +2 testes.
+- **`payload NOT NULL`** (`lib/idempotency/ledger.ts`): `integration_events.payload` é NOT
+  NULL (default `'{}'`) mas endpoints `sensitive` (OTP) passavam `null` → insert falhava
+  **silenciosamente** (erro em `.error`, supabase-js não lança) → `claimIdempotency` caía
+  no fallback `skip` → **endpoints sensitive sem idempotência**. Sintoma: OTP nunca gravava
+  row no ledger. Fix `insertRow.payload = opts.payload ?? {}`. Provado live. +2 testes.
+- **OTP redact-before-record** (`lib/api/internal-handler.ts`): `recordResult` persistiria
+  `otp_code` plaintext em `integration_events.result` (jsonb) indefinidamente (além do TTL
+  do OTP) — ADR-021 D7. Agora redact aplica-se **antes** de `withIdempotency` gravar →
+  ledger, replay e response todos sem `otp_code`. Provado live: ledger `result` sem
+  `otp_code`; replay (mesma key) não re-executa (`otp_generated` +1 não +2).
+
+### Validação
+- `tsc --noEmit` limpo (fonte; `.next/dev/types` gerado ignorado). **175/175 vitest**
+  (16 suítes, +4 regressões ledger). Live (dev, real): OTP c/ `Idempotency-Key` → 200 sem
+  `otp_code` + ledger `processed` + `delivery_otps` hash + `otp_generated`; replay não
+  duplica. Regressão DB não executada (mudanças só em TS, sem migration).
+
+### Ressalva (regra mestra — não simulado PASS)
+- Phase 2 n8n live (importar/configurar/validar workflows) — blocked em n8n URL + Public
+  API key + versão (usuário). Envio WhatsApp real requer credenciais Evolution/DataCrazy.
+  DB Webhook (`pg_net` + `supabase_functions` sobre `delivery_events`) requer provisionamento.
+  Geo `/quote`+`/enrich` 501 (Sessão 20). Storage RLS comportamental, UI, rate
+  limiting/mTLS → Sessões 17-19/22/26.
+
+## [Sessão 15] — 2026-08-29 — Endpoints driver/user-facing, signed links, webhook router, cookie/middleware full (ADR-020)
+
+> Camada de aplicação **pura** — sem migration/RPC/enum/grant novo. Os 4 RPCs driver-facing
+> (`respond_to_offer`, `submit_proof_of_delivery`, `transition_delivery`,
+> `set_driver_availability`) são finais desde Sessões 09-12. Fecha a contract surface do
+> ADR-018 D5 e a ressalva de Sessão 14/ADR-019 D7.
+
+### Adicionado
+- **Signed links** (`lib/auth/signed-link.ts`): HMAC-SHA256 create/verify, token
+  `base64url(payload)."."base64url(hmac)`, payload `{o,d,e,n}`, TTL 900s, IDOR-protegido
+  (`o===expectedOfferId`), timing-safe, **fail-closed** se `ACTION_LINK_SIGNING_SECRET`
+  ausente. + testes (create/verify/IDOR/expirado/tampered/malformed/fail-closed).
+- **Handlers** (`lib/api/`): `user-handler.ts` (`handleUserPost` — cookie JWT, getUser→401,
+  sem ledger), `offer-respond-handler.ts` (`handleOfferRespondPost` — dual-auth cookie-ou-
+  token, IDOR), `webhook-auth.ts` (`verifyDatacrazySignature` timing-safe fail-closed),
+  `webhook-handler.ts` (`handleWebhookPost` — signature→dedup `webhook_events`→parse→route→
+  200 sempre). + testes (95 novos).
+- **Service layer driver** (`lib/services/driver.ts`): `respondToOffer`/`submitProofOfDelivery`/
+  `transitionDeliveryDriver`/`setDriverAvailability` (client-agnostic; `set_driver_availability`
+  void+raise mapeado p/ 403; `resolveDriverId` de `auth.uid()`). Validators
+  (`validateRespondOfferBody`/`validatePodBody`/`validateTransitionBody`/
+  `validateAvailabilityBody`). + testes.
+- **Route Handlers (6)**: `POST /api/offers/{id}/respond` (dual-auth),
+  `POST /api/driver/deliveries/{id}/transitions` (cookie), `POST /api/driver/deliveries/{id}/pod`
+  (cookie, sensitive), `POST /api/driver/availability` (cookie, resolveDriverId),
+  `POST /api/internal/offers/{id}/respond-link` (internal-auth, generator sem ledger),
+  `POST /api/webhooks/datacrazy` (signature router). + `app/auth/login/page.tsx` (placeholder).
+- **Middleware full** (`lib/supabase/middleware-client.ts` sem `server-only`; `middleware.ts`
+  reescrito: `getUser()` refresh via `setAll`→response.cookies, protege `/driver`/`/admin`/
+  `/business` → 307 `/auth/login?redirect=` (`NextResponse.redirect` default, validado live), libera `/api/*`/`/auth/*`/estáticos).
+- **`lib/rpc/result.ts`**: `reasonToStatus` estendido (unauthenticated→401, offer_expired→410,
+  offer_already_responded/delivery_not_searching/pod_already_submitted/invalid_transition/
+  reassignment_limit_reached→409, offer_not_found_for_driver→404, invalid_bid_amount/
+  invalid_response_type/invalid_pod→400). + testes.
+- **ADR-020** (D1-D10) + BACKEND §11 + ARCHITECTURE §15 + `.env.example`
+  (`ACTION_LINK_SIGNING_SECRET`, `DATACRAZY_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`).
+
+### Validação
+- `tsc --noEmit` clean; **124/124** vitest PASS (12 suítes — 81 novos + 43 Sessão 14).
+- Regressão DB: reset+replay 0001→0028 (28/28), 10/10 suítes PASS (zero regressão).
+- Live vertical slice `next dev`+curl (ver plano): auth driver cookie, endpoints driver
+  200, 401 sem cookie, signed link generator+respond+expirado/tampered+replay, webhook
+  signature/dedup/inválida, middleware redirect.
+- **Ressalvas (declarado, não PASS)**: UI PWA/dashboards/portal (Sessões 17-19),
+  DataCrazy/WhatsApp outbound real (Sessão 16), provider Google Maps (Sessão 20 — `/quote`
+  `/enrich` 501), Storage RLS comportamental (Sessões 17-19).
+
 ## [Sessão 14] — 2026-08-29 — Camada de API: Next.js Route Handlers (pivot n8n → API layer)
 
 > Sessão 14 como escrita no roadmap (implementar n8n) estava BLOCKED (sem instância n8n,

@@ -348,9 +348,38 @@
     **Sessão 15**. Provider Google Maps → **Sessão 20** (501 hoje). n8n implementação reabre
     com Route Handlers + WhatsApp.
   - **Veredito**: GO para Sessão 15 (driver/user endpoints + webhook router + cookie/middleware).
-- **Próxima**: Sessão 15 — endpoints driver/user-facing (`respond_to_offer`,
-  `submit_proof_of_delivery`, transitions driver-side via JWT+signed links) + webhook router
-  DataCrazy + cookie/refresh/middleware full (ADR-010 D6).
+- **Sessão 15**: Endpoints driver/user-facing, signed links, webhook router, cookie/middleware
+  full (ADR-020) — **concluída — PASS**.
+  - **Entrega**: camada de aplicação **pura** (sem migration/RPC/grant novo — 4 RPCs driver-facing
+    finais desde Sessões 09-12). Signed links HMAC (`lib/auth/signed-link.ts`, fail-closed, IDOR,
+    TTL 900s) + handlers (`handleUserPost` cookie JWT, `handleOfferRespondPost` dual-auth
+    cookie-ou-token, `handleWebhookPost` signature→dedup→route→200, `verifyDatacrazySignature`
+    timing-safe fail-closed) + service layer driver (`respondToOffer`/`submitProofOfDelivery`/
+    `transitionDeliveryDriver`/`setDriverAvailability` void+raise→403, `resolveDriverId`) +
+    validators + **6 Route Handlers** (`/offers/{id}/respond` dual, `/driver/deliveries/{id}/
+    transitions`, `/pod`, `/driver/availability`, `/internal/offers/{id}/respond-link` generator,
+    `/webhooks/datacrazy`) + login placeholder + middleware-client (SEM server-only) + middleware
+    reescrito (refresh `setAll`→response.cookies, protege `/driver`/`/admin`/`/business`→307
+    `/auth/login`) + `reasonToStatus` estendido (401/410/409/404/400/403) + **ADR-020** (D1-D10)
+    + BACKEND §11 + ARCHITECTURE §15 + `.env.example` (`ACTION_LINK_SIGNING_SECRET`,
+    `DATACRAZY_WEBHOOK_SECRET`, `NEXT_PUBLIC_APP_URL`).
+  - **ADR-020**: D1 dois modos auth (cookie JWT + signed link HMAC dual); D2 service aceita
+    client (handler decide escopo); D3 signed link HMAC; D4 generator system/internal (sem
+    ledger); D5 webhook router (signature+dedup `webhook_events`+route+200 sempre); D6
+    cookie/middleware full; D7 idempotência (interna respond_to_offer, sem ledger user-facing);
+    D8 mapeamento estendido; D9 logs sem secrets; D10 sem migration.
+  - **Validação real**: `tsc` clean + **124/124** vitest (12 suítes, 81 novos) + regressão DB
+    10/10 suítes (zero regressão, nada tocou o DB) + live vertical slice `next dev`+curl.
+  - **Bugs corrigidos**: `webhook-handler` `createSystemClient()` row-type `never` → anotado
+    `SupabaseClient`; `vi.fn` sem params → tipados.
+  - **Ressalvas (declarado, não PASS)**: UI PWA/dashboards/portal (Sessões 17-19),
+    WhatsApp outbound (Sessão 16), provider Google Maps (Sessão 20 — `/quote`+`/enrich` 501),
+    Storage RLS comportamental (Sessões 17-19), rate limiting/mTLS/rotação (Sessão 22/26), n8n
+    implementação live (Sessão 16).
+  - **Veredito**: GO para Sessão 16 (DataCrazy/WhatsApp outbound) ou Sessão 17 (UI).
+- **Próxima**: Sessão 16 — DataCrazy/WhatsApp outbound (envio de mensagens, OTP via WhatsApp,
+    embedding do signed link pelo n8n #6) ou Sessão 17 (UI Next.js — PWA entregador / Painel /
+  Portal).
 
 ## Roadmap (20 fases / 29 sessões)
 

@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante (até ADR-019) |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-022) |
 
 ## Estado atual
 
@@ -327,9 +327,98 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   links) + webhook router DataCrazy + cookie/refresh/middleware full → **Sessão 15**
   (declarado, não PASS). Provider Google Maps real → **Sessão 20** (501 hoje). n8n
   implementação reabre com Route Handlers + WhatsApp.
-- **Próxima**: Sessão 15 — endpoints driver/user-facing (`respond_to_offer`,
-  `submit_proof_of_delivery`, transitions driver-side via JWT+signed links) + webhook router
-  DataCrazy + cookie/refresh/middleware full (ADR-010 D6).
+- **Próxima**: Sessão 16 Phase 2 — n8n live (importar/configurar/validar workflows contra
+  instância n8n provisionada pelo usuário: URL + Public API key + versão) + Phase 3
+  (failures/retry/DLQ/reconciler/novas rodadas) + Phase 4 (docs finais + regressão).
+  Requer habilitar `pg_net` no dev + criar Database Webhook sobre `delivery_events` (URL
+  n8n). WhatsApp outbound live requer credenciais Evolution/DataCrazy (D1 ADR-021).
+- **Sessão 16 (em andamento — Phase 1 + design/contrato concluídos)**: WhatsApp outbound
+  híbrido + n8n trigger model/contrato. **Phase 1 (backend outbound) — PASS**: ADR-021
+  (D1 provider híbrido DataCrazy+Evolution V2 [Bearer p/ conversa aberta, apikey+fallback
+  flat #2570 p/ cold proactive]; D2 backend **envia+loga** via novo `POST /api/internal/
+  notifications/send` [system, `x-internal-api-key`] — resolve destinatário, gera signed
+  link, escolhe provider, envia, upsert em `notifications`; `service_role` interno nunca
+  vaza; n8n só dispara; D3 `notifications.recipient_phone` + `whatsapp_conversations` p/
+  roteamento; D5 `POST /api/internal/reconciler/scan` read-only state-based; D6 sem
+  RPC/enum novo) + migration **0029** (schema prep: `notifications.recipient_phone` +
+  relax CHECK + tabela `whatsapp_conversations` RLS default-deny; **sem funções**) +
+  provider abstraction (copy ADR-005, 501 `whatsapp_provider_not_configured` sem provider).
+  **3 bugs reais achados+fixados+provados live**: (1) `withIdempotency` **release-on-throw**
+  — `fn()` que lança (provider 501/5xx) deixava claim `pending` p/ sempre → retry 409
+  `in_flight`, envenenando a chave; agora `releaseClaim` deleta + propaga (lança=
+  transitório, retorna RpcResult=terminal/replayable); (2) `payload NOT NULL` —
+  `integration_events.payload` é NOT NULL mas endpoints `sensitive` (OTP) passavam `null`
+  → insert falhava **silenciosamente** (erro em `.error`, supabase-js não lança) →
+  `claimIdempotency` caía no fallback `skip` → **OTP sem idempotência**; fix `payload ?? {}`;
+  (3) **OTP redact-before-record** — `recordResult` persistiria `otp_code` plaintext no
+  ledger indefinidamente; agora redact antes de gravar → ledger, replay e response todos
+  sem `otp_code` (ADR-021 D7). Provado live: OTP c/ `Idempotency-Key` → ledger
+  `status:'processed'` `result:{ok:true,reason:'generated'}` **sem otp_code**; replay
+  (mesma key) **não re-executa** (`otp_generated` +1 não +2); `delivery_otps` 1 row hash
+  64. **Design/contrato (sem instância n8n)**: ADR-022 (supersede ADR-018 D2 — trigger model
+  Realtime→**Database Webhooks** `pg_net`+`supabase_functions` sobre `delivery_events`
+  INSERT → n8n Webhook node → Switch `record.event_type` → Execute Sub-workflow; n8n sem
+  trigger nativo Realtime, DB Webhook mapeia limpo; Wait≥65s durável + reconciler backstop
+  state-based; `service_role` nunca no n8n [3 fronteiras auth: Supabase→n8n
+  `httpHeaderAuth` separado, n8n→backend `x-internal-api-key`, backend→Supabase
+  `service_role`]; OTP: n8n chama `notifications/send {type:'otp'}`, **não**
+  `/deliveries/{id}/otp` [geração-only, redact]; reconciler `reconciler/scan`; inbound
+  backend router [#1/#7/#16]) + `N8N_WORKFLOWS.md` revisado (tabela de endpoints alinhada
+  Sessões 14-15 [/api/driver/deliveries/{id}/{transitions,pod}, /api/internal/
+  notifications/send, /reconciler/scan, /offers/{id}/respond-link, /api/offers/{id}/respond
+  dual cookie-ou-token], #6/#10/#11/#12 → `notifications/send`, #8 reason
+  `already_assigned` [não `superseded_by_concurrent_claim` — este é metadata.reason do
+  `round_closed`], #15 → `reconciler/scan` state-based, #1/#7/#16 = backend router).
+  Hardening: `tsc` limpo; **175/175 vitest** (16 suítes, +2 regressões ledger). **Ressalva
+  (regra mestra — não simulado PASS)**: Phase 2 n8n live + envio WhatsApp real + DB Webhook
+  provisionado — deferred (blocked em n8n URL + API key + versão pelo usuário). Geo 501
+  (Sessão 20). Storage RLS, UI, rate limiting/mTLS → Sessões 17-19/22/26.
+- **Sessão 15 (concluída)**: Endpoints driver/user-facing, signed links, webhook router,
+  cookie/middleware full — **PASS (com ressalva)**. Camada de aplicação **pura** —
+  **sem migration/RPC/enum/grant novo** (os 4 RPCs driver-facing — `respond_to_offer` (0016),
+  `submit_proof_of_delivery` (0028), `transition_delivery` (0028), `set_driver_availability`
+  (0016) — são finais desde Sessões 09-12). Entrega: signed links HMAC (`lib/auth/signed-link.ts`,
+  fail-closed, IDOR `o===offerId`, TTL 900s, timing-safe) + handlers (`handleUserPost` cookie
+  JWT→401, `handleOfferRespondPost` dual-auth cookie-ou-token, `handleWebhookPost`
+  signature→dedup `webhook_events`→route→200 sempre, `verifyDatacrazySignature` timing-safe
+  fail-closed) + service layer driver (`respondToOffer`/`submitProofOfDelivery`/
+  `transitionDeliveryDriver`/`setDriverAvailability` void+raise→403, `resolveDriverId` de
+  `auth.uid()`) + validators + **6 Route Handlers** (`POST /api/offers/{id}/respond` dual,
+  `/api/driver/deliveries/{id}/{transitions,pod}`, `/api/driver/availability`,
+  `/api/internal/offers/{id}/respond-link` generator, `/api/webhooks/datacrazy`) + login
+  placeholder + `lib/supabase/middleware-client.ts` (SEM server-only) + `middleware.ts`
+  reescrito (`getUser()` refresh `setAll`→response.cookies, protege `/driver`/`/admin`/
+  `/business`→307 `/auth/login` — `NextResponse.redirect` default, validado live) + `reasonToStatus` estendido (`unauthenticated`→401,
+  `offer_expired`→410, `offer_already_responded`/`invalid_transition`/...→409,
+  `offer_not_found_for_driver`→404, `invalid_bid_amount`/`invalid_pod`→400, `not_authorized`→403)
+  + **ADR-020** (D1 dois modos auth; D2 service aceita client; D3 signed link HMAC; D4
+  generator system sem ledger; D5 webhook router signature+dedup+route+200; D6
+  cookie/middleware full; D7 idempotência interna respond_to_offer sem ledger; D8 mapeamento
+  estendido; D9 logs sem secrets; D10 sem migration) + BACKEND §11 + ARCHITECTURE §15 +
+  `.env.example` (`ACTION_LINK_SIGNING_SECRET`, `DATACRAZY_WEBHOOK_SECRET`,
+  `NEXT_PUBLIC_APP_URL`). `service_role` nunca vaza (signed link system-scoped só p/
+  respond_to_offer; webhook só `webhook_events` service-only + services; user-facing user-scoped).
+  ACEITAR ≠ GANHAR + Submete POD ≠ entregue preservados. Hardening: `tsc --noEmit` clean;
+  **124/124** vitest PASS (12 suítes, 81 novos); regressão DB **10/10 suítes** (zero
+  regressão, nada tocou o DB) + **live vertical slice `next dev`+curl (dev, real)**:
+  cookie JWT (availability on/off/restore → 200, sem cookie → 401; transitions
+  assigned→driver_to_pickup→at_pickup→picked_up→in_transit → 200; POD pickup → 200 +
+  `pod_submitted`), signed link (generator internal-auth → `{token,url}`; respond
+  system-scoped → `accepted`+bid; tampered/expired/IDOR → 401; replay →
+  `already_responded`), webhook (signature válida → 200+`accepted`; duplicado →
+  `idempotent_replay`; sig inválida → 401; unknown intent → `routed_with_error`;
+  `otp_request` → OTP gerado+evento), SWAC `select_winner_and_claim` → `assigned`
+  (1 assignment ativa), middleware (sem cookie → **307** `/auth/login?redirect=`;
+  com cookie → passa). **Achado live**: location do driver envelheceu >300s durante o
+  setup → SWAC corretamente `no_candidates` (round fecha) → recovery reproduziu o
+  caminho fiel de produção (nova rodada c/ location fresca) → 9/9 PASS. **Bug de
+  harness, não de código.** Bugs de código corrigidos:
+  `webhook-handler` `createSystemClient()` row-type `never` (ReturnType mais estrito que
+  `SupabaseClient<any>`)→anotado `SupabaseClient`; `vi.fn` sem params→tipados.
+  **Ressalva (regra mestra — não simulado PASS)**: UI PWA/dashboards/portal (Sessões 17-19),
+  WhatsApp outbound real (Sessão 16), provider Google Maps (Sessão 20 — `/quote`+`/enrich`
+  501), Storage RLS comportamental (Sessões 17-19), rate limiting/mTLS/rotação (Sessão 22/26),
+  n8n implementação live (Sessão 16 + reabertura n8n).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.
 

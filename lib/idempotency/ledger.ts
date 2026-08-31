@@ -76,12 +76,16 @@ export async function claimIdempotency(
 
   // 2. Tenta inserir (claim). upsert ignore-duplicates resolve race concorrente.
   // onConflict acompanha a coluna de dedup em uso (ambas têm unique (source, <col>)).
+  // `payload` é NOT NULL (default '{}'::jsonb). Endpoints `sensitive` (OTP) passam
+  // `payload: null` (não logam body/PII) — enviar null violaria NOT NULL, a insert
+  // falharia silenciosamente (erro em `.error`, `ins.data=null`) e cairíamos no
+  // fallback `skip` → **sem idempotência**. `{}` respeita a coluna sem vazar PII.
   const insertRow = {
     source: opts.source,
     idempotency_key: opts.idempotencyKey ?? null,
     external_event_id: opts.externalEventId ?? null,
     event_type: opts.eventType ?? null,
-    payload: opts.payload ?? null,
+    payload: opts.payload ?? {},
     status: "pending",
   };
   const ins = await client
@@ -131,6 +135,22 @@ export class InFlightError extends Error {
   status = 409;
 }
 
+/**
+ * Libera (deleta) a claim quando `fn` lança — falha transitória (ex.: provider
+ * 501 `whatsapp_provider_not_configured`, 5xx do Evolution/DataCrazy) NÃO deve
+ * envenenar a chave de idempotência. Sem isso, a row fica `pending` para sempre
+ * e o retry com o mesmo `Idempotency-Key` cai em `in_flight` → 409, bloqueando
+ * a retomada legítima do n8n após provisionamento/recuperação.
+ *
+ * Distinção: **lança = transitório/retryable**, **retorna RpcResult = terminal/
+ * replayable**. Resultados lógicos ({ok:false,reason} — wrong_state, not_found,
+ * invalid_*) NÃO lançam; gravados por `recordResult` e replayed. Providers
+ * (abstração ADR-005) lançam — infra transitória.
+ */
+async function releaseClaim(client: SupabaseClient, tokenId: string): Promise<void> {
+  await client.from("integration_events").delete().eq("id", tokenId);
+}
+
 export async function withIdempotency(
   client: SupabaseClient,
   opts: IdempotencyOpts,
@@ -140,7 +160,15 @@ export async function withIdempotency(
   if (claim.kind === "replay") return claim.result;
   if (claim.kind === "in_flight") throw new InFlightError();
   if (claim.kind === "skip") return fn();
-  const result = await fn();
+  let result: RpcResult;
+  try {
+    result = await fn();
+  } catch (e) {
+    // Falha transitória (provider 501/5xx) — libera a claim p/ retry re-executar.
+    // Resultados lógicos ({ok:false,reason}) NÃO lançam; são gravados e replayed.
+    await releaseClaim(client, claim.tokenId);
+    throw e;
+  }
   await recordResult(client, claim.tokenId, result);
   return result;
 }
