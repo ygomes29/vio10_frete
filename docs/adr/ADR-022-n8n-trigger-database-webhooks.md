@@ -179,10 +179,54 @@ porque o Switch não o mapeia a um sub-workflow).
   criar credencial `httpHeaderAuth` no n8n + importar workflows via Public API —
   **Phase 2 live** (blocked em URL n8n + Public API key + versão, fornecidos pelo
   usuário). Não simulado.
-- **Ressalvas (regra mestra)**: validação live deferida (Phase 2). Geo `/quote`+`/enrich`
-  501 (Sessão 20). Storage RLS comportamental, UI, rate limiting/mTLS → Sessões
-  17-19/22/26. Envio WhatsApp real depende de credenciais Evolution/DataCrazy (D1
-  ADR-021) — Phase 2.
+- **Ressalvas (regra mestra)**: validação live do **trigger model** feita (ver seção
+  "Validação live (Phase 2)"). Sub-workflows restantes + n8n→backend reachability + envio
+  WhatsApp real → Phase 3. Geo `/quote`+`/enrich` 501 (Sessão 20). Storage RLS comportamental,
+  UI, rate limiting/mTLS → Sessões 17-19/22/26. Envio WhatsApp real depende de credenciais
+  Evolution/DataCrazy (D1 ADR-021) — Phase 3.
+
+## Validação live (Phase 2 — 2026-08-31)
+
+O usuário provisionou instância n8n (`https://n8n.processlabcorp.com.br/`) + Public API key.
+**Não simulado** — tudo abaixo é execução real contra a instância e o dev Supabase.
+
+1. **pg_net egress dev Supabase → n8n público**: habilitado `pg_net` (schema `net`);
+   `net.http_post` ao echo workflow → n8n exec 209392 recebendo o body `{"hello":"from-pgnet"}`
+   (`user-agent: pg_net/0.20.4`, confirmado no runData). Transporte provado.
+2. **Dispatcher `VIO10-dispatcher`** (id `8M68aj7oExxijS73`): Webhook node (POST
+   `/webhook/vio10-dispatcher`, `responseMode: onReceived` = ack 200 fire-and-forget, padrão
+   robusto p/ DB trigger) → Code node valida `x-webhook-secret` (reject
+   `invalid_webhook_secret`, exec 209410) + mapeia `event_type`→workflow (D2). Ping manual
+   → exec 209409 `success`, route `{branch:'delivery_created', target_workflow:'#2-enrich'}`.
+3. **DB trigger `trg_delivery_events_notify_n8n`** (AFTER INSERT `delivery_events`, função
+   `notify_n8n_delivery_event` SECURITY DEFINER `set search_path=public,net` →
+   `net.http_post` ao dispatcher c/ `x-webhook-secret`). **Infra de runtime, NÃO migration**
+   (D1: provisão live via Management API, não `supabase/migrations` — o trigger não sobrevive
+   a reset+replay, o que é desejável p/ manter a regressão determinística). Provado: INSERT
+   real em `delivery_events` (service_role, FK válida) → trigger dispara → n8n exec c/
+   `record.event_id` batendo **exato** com a row inserida:
+   `delivery_created`→#2-enrich (209417), `delivered`→#12-terminal (209419),
+   `otp_generated`→NOOP-chain (209420, ramo no-op correto), `round_closed`→#8-close (209421).
+4. **Sub-workflow `VIO10-#2-enrich`** (id `zQsbwxwW9I8wD32L`): Webhook → HTTP Request
+   (v4.2) → `http://localhost:3000/api/internal/deliveries/{{ $json.body.delivery_request_id }}/enrich`
+   c/ headers `x-internal-api-key` (placeholder; `httpHeaderAuth` credential não criável via
+   Public API — "type not a known type" — header literal usado; valor real é config-swap) +
+   `Idempotency-Key: {corr}-enrich` (R17). Exec 209427: o request foi montado e disparado
+   (**wiring provado** — URL template interpolada + headers) e errou `ECONNREFUSED`
+   ("service refused the connection - perhaps it offline") = **gap honesto de
+   reachability**: n8n roda num host público, o backend Next.js está em `localhost:3000` do
+   dev (não alcançável do n8n). Os handlers backend já foram provados live via curl na
+   Sessão 14-15; o único seam não-provado é a rede n8n→backend, que exige **tunnel** (ngrok/
+   cloudflared) ou **deploy público** do Next.js — um problema de deployment, não de
+   arquitetura. O ECONNREFUSED é o resultado correto e esperado enquanto o backend não é
+   exposto.
+
+**Conclusão Phase 2**: o mecanismo de reação a eventos (DB trigger → pg_net → n8n
+dispatcher → roteamento por `event_type`) está **provado live**. O wiring n8n→backend
+(HTTP Request + auth + URL template + Idempotency-Key) está **provado estruturalmente**;
+a call live depende de reachability (Phase 3). `service_role` nunca no n8n (D4 íntegro); OTP
+plaintext nunca transita pelo n8n (D5 — o enrich não toca OTP; o sub-workflow #11 future
+usará `notifications/send {type:'otp'}`).
 
 ## Referências
 

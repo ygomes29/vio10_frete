@@ -327,13 +327,15 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   links) + webhook router DataCrazy + cookie/refresh/middleware full → **Sessão 15**
   (declarado, não PASS). Provider Google Maps real → **Sessão 20** (501 hoje). n8n
   implementação reabre com Route Handlers + WhatsApp.
-- **Próxima**: Sessão 16 Phase 2 — n8n live (importar/configurar/validar workflows contra
-  instância n8n provisionada pelo usuário: URL + Public API key + versão) + Phase 3
-  (failures/retry/DLQ/reconciler/novas rodadas) + Phase 4 (docs finais + regressão).
-  Requer habilitar `pg_net` no dev + criar Database Webhook sobre `delivery_events` (URL
-  n8n). WhatsApp outbound live requer credenciais Evolution/DataCrazy (D1 ADR-021).
-- **Sessão 16 (em andamento — Phase 1 + design/contrato concluídos)**: WhatsApp outbound
-  híbrido + n8n trigger model/contrato. **Phase 1 (backend outbound) — PASS**: ADR-021
+- **Próxima**: Sessão 16 Phase 3 — sub-workflows n8n restantes (#6 offers, #8 close, #10
+  assignment, #11 updates+OTP, #12 notify, #13 confirm, #14 failures) + reconciler scan
+  workflow (Schedule Trigger → `/api/internal/reconciler/scan`) + **n8n→backend
+  reachability** (tunnel ou deploy público do Next.js — wiring provado em Phase 2, call =
+  ECONNREFUSED esperado enquanto backend é localhost) + envio WhatsApp real (credenciais
+  Evolution/DataCrazy, D1 ADR-021) + Phase 4 (docs finais + regressão). Trigger DB
+  `trg_delivery_events_notify_n8n` + dispatcher + `#2-enrich` ativos no dev.
+- **Sessão 16 (em andamento — Phase 1 + design + Phase 2 trigger model live
+  concluídos)**: WhatsApp outbound híbrido + n8n trigger model/contrato/live. **Phase 1 (backend outbound) — PASS**: ADR-021
   (D1 provider híbrido DataCrazy+Evolution V2 [Bearer p/ conversa aberta, apikey+fallback
   flat #2570 p/ cold proactive]; D2 backend **envia+loga** via novo `POST /api/internal/
   notifications/send` [system, `x-internal-api-key`] — resolve destinatário, gera signed
@@ -369,10 +371,30 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   dual cookie-ou-token], #6/#10/#11/#12 → `notifications/send`, #8 reason
   `already_assigned` [não `superseded_by_concurrent_claim` — este é metadata.reason do
   `round_closed`], #15 → `reconciler/scan` state-based, #1/#7/#16 = backend router).
+  **Phase 2 (trigger model) — PASS live (não simulado)**: usuário provisionou instância n8n
+  (`https://n8n.processlabcorp.com.br/`) + Public API key. (1) **pg_net egress** dev Supabase
+  → n8n público provado (echo workflow + exec 209392, body `{"hello":"from-pgnet"}` no
+  runData, `user-agent: pg_net/0.20.4`). (2) **Dispatcher `VIO10-dispatcher`**
+  (id `8M68aj7oExxijS73`): Webhook → Code valida `x-webhook-secret` (reject
+  `invalid_webhook_secret`, exec 209410) + mapeia `event_type`→workflow; ping manual → exec
+  209409 `success` route `delivery_created→#2-enrich`. (3) **DB trigger**
+  `trg_delivery_events_notify_n8n` (AFTER INSERT `delivery_events`, função
+  `notify_n8n_delivery_event` SECURITY DEFINER `net.http_post` ao dispatcher c/
+  `x-webhook-secret`) — **infra de runtime, NÃO migration** (ADR-022 D1: provisão live via
+  Management). Provado: INSERT real → trigger dispara → n8n exec c/ `event_id` batendo
+  exato: `delivery_created`→#2 (209417), `delivered`→#12 (209419), `otp_generated`→NOOP-chain
+  (209420), `round_closed`→#8 (209421). (4) **Sub-workflow `VIO10-#2-enrich`**
+  (id `zQsbwxwW9I8wD32L`): HTTP Request → `http://localhost:3000/.../{id}/enrich` c/ headers
+  `x-internal-api-key` + `Idempotency-Key:{corr}-enrich` — exec 209427 montou o request
+  (wiring provado) + errou `ECONNREFUSED` = **gap honesto de reachability** (n8n público →
+  backend localhost; tunnel/prod; handlers já provados via curl Sessão 14-15). `service_role`
+  nunca no n8n (3 fronteiras auth); OTP plaintext nunca transita n8n (D5).
   Hardening: `tsc` limpo; **175/175 vitest** (16 suítes, +2 regressões ledger). **Ressalva
-  (regra mestra — não simulado PASS)**: Phase 2 n8n live + envio WhatsApp real + DB Webhook
-  provisionado — deferred (blocked em n8n URL + API key + versão pelo usuário). Geo 501
-  (Sessão 20). Storage RLS, UI, rate limiting/mTLS → Sessões 17-19/22/26.
+  (regra mestra — não simulado PASS)**: sub-workflows restantes (#6/#8/#10/#11/#12/#13/#14) +
+  reconciler scan workflow + **n8n→backend reachability** (backend localhost não alcançável
+  pelo n8n público — tunnel/deploy público; wiring provado, ECONNREFUSED esperado) + envio
+  WhatsApp real (credenciais Evolution/DataCrazy) — Phase 3. Geo 501 (Sessão 20). Storage RLS,
+  UI, rate limiting/mTLS → Sessões 17-19/22/26.
 - **Sessão 15 (concluída)**: Endpoints driver/user-facing, signed links, webhook router,
   cookie/middleware full — **PASS (com ressalva)**. Camada de aplicação **pura** —
   **sem migration/RPC/enum/grant novo** (os 4 RPCs driver-facing — `respond_to_offer` (0016),

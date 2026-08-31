@@ -2,11 +2,30 @@
 
 Formato: sessão + data + escopo.
 
-## [Sessão 16] — 2026-08-31 — WhatsApp outbound híbrido + n8n trigger model/contrato (ADR-021, ADR-022) — Phase 1 + design
+## [Sessão 16] — 2026-08-31 — WhatsApp outbound híbrido + n8n trigger model/contrato/live (ADR-021, ADR-022) — Phase 1 + design + Phase 2 trigger model
 
-> **Phase 1 (backend outbound) concluída + design/contrato n8n.** Phase 2 (n8n live) blocked
-> em instância n8n provisionada pelo usuário. Decisões do usuário: D1 híbrido (DataCrazy
-> nativo + Evolution V2 fallback), D2 backend envia+loga, D3 backend é o único inbound.
+> **Phase 1 (backend outbound) + design/contrato n8n + Phase 2 (trigger model live)
+> concluídos.** Phase 3: sub-workflows restantes + reconciler scan + n8n→backend
+> reachability (tunnel/deploy público) + envio WhatsApp real. Decisões do usuário: D1
+> híbrido (DataCrazy nativo + Evolution V2 fallback), D2 backend envia+loga, D3 backend é o
+> único inbound.
+
+### Validado live (Phase 2 — não simulado)
+- **pg_net egress** dev Supabase → n8n público (`https://n8n.processlabcorp.com.br/`):
+  echo workflow + exec 209392 (body `{"hello":"from-pgnet"}`, `user-agent: pg_net/0.20.4`).
+- **Dispatcher `VIO10-dispatcher`** (id `8M68aj7oExxijS73`): Webhook → Code valida
+  `x-webhook-secret` (reject `invalid_webhook_secret`, exec 209410) + mapeia
+  `event_type`→workflow. Ping manual → exec 209409 `success` route `delivery_created→#2-enrich`.
+- **DB trigger `trg_delivery_events_notify_n8n`** (AFTER INSERT `delivery_events`, função
+  `notify_n8n_delivery_event` SECURITY DEFINER `net.http_post` ao dispatcher c/
+  `x-webhook-secret`) — **infra de runtime, NÃO migration** (ADR-022 D1). Provado: INSERT
+  real → n8n exec c/ `event_id` exato — `delivery_created`→#2 (209417), `delivered`→#12
+  (209419), `otp_generated`→NOOP-chain (209420), `round_closed`→#8 (209421).
+- **Sub-workflow `VIO10-#2-enrich`** (id `zQsbwxwW9I8wD32L`): HTTP Request →
+  `http://localhost:3000/.../{id}/enrich` c/ `x-internal-api-key` + `Idempotency-Key:{corr}-enrich`
+  — exec 209427 montou o request (wiring provado) + `ECONNREFUSED` = gap honesto de
+  reachability (n8n público → backend localhost; handlers já provados via curl Sessão 14-15).
+  `service_role` nunca no n8n (3 fronteiras auth); OTP plaintext nunca transita n8n.
 
 ### Adicionado
 - **Migration 0029** (schema prep): `notifications.recipient_phone` + relax CHECK

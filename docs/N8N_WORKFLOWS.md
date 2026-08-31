@@ -8,9 +8,13 @@
 > aqui são **verificados contra as migrations** (não inventados).
 >
 > **Status de validação:** design concluído (Sessão 13) + trigger model revisado
-> (Sessão 16, ADR-022). Implementação + validação live **deferidas** para a Phase 2
-> (requer n8n provisionado — URL + Public API key + versão fornecidos pelo usuário).
-> Não simulado (regra mestra).
+> (Sessão 16, ADR-022) + **trigger model provado live** (Sessão 16 Phase 2: pg_net egress,
+> dispatcher `VIO10-dispatcher` c/ validação de secret + roteamento por `event_type`, DB
+> trigger `trg_delivery_events_notify_n8n` sobre `delivery_events` INSERT → n8n, 4 event
+> types com `event_id` exato; sub-workflow `VIO10-#2-enrich` HTTP Request wiring provado —
+> `ECONNREFUSED` é gap de reachability, não arquitetura). **Sub-workflows restantes +
+> reconciler scan + n8n→backend reachability (tunnel/deploy público) + envio WhatsApp real**
+> → Phase 3. Não simulado (regra mestra).
 
 ## Regra obrigatória
 
