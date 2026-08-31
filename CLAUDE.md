@@ -327,15 +327,15 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   links) + webhook router DataCrazy + cookie/refresh/middleware full → **Sessão 15**
   (declarado, não PASS). Provider Google Maps real → **Sessão 20** (501 hoje). n8n
   implementação reabre com Route Handlers + WhatsApp.
-- **Próxima**: Sessão 16 Phase 3 — sub-workflows n8n restantes (#6 offers, #8 close, #10
-  assignment, #11 updates+OTP, #12 notify, #13 confirm, #14 failures) + reconciler scan
-  workflow (Schedule Trigger → `/api/internal/reconciler/scan`) + **n8n→backend
-  reachability** (tunnel ou deploy público do Next.js — wiring provado em Phase 2, call =
-  ECONNREFUSED esperado enquanto backend é localhost) + envio WhatsApp real (credenciais
-  Evolution/DataCrazy, D1 ADR-021) + Phase 4 (docs finais + regressão). Trigger DB
-  `trg_delivery_events_notify_n8n` + dispatcher + `#2-enrich` ativos no dev.
-- **Sessão 16 (em andamento — Phase 1 + design + Phase 2 trigger model live
-  concluídos)**: WhatsApp outbound híbrido + n8n trigger model/contrato/live. **Phase 1 (backend outbound) — PASS**: ADR-021
+- **Próxima**: Sessão 16 Phase 3 (restante) — sub-workflow #8-close (Wait/SWAC,
+  `/dispatch/rounds/{id}/close`) + #9-nova-rodada encadeado (**bloqueado por geo 501** —
+  `create_quote` precisa routing provider, Sessão 20) + envio WhatsApp real (credenciais
+  Evolution/DataCrazy, D1 ADR-021 — hoje 501) + Phase 4 (docs/ADRs finais + regressão DB
+  10/10 suítes). **Phase 3 sub-workflows #6/#10/#11/#12/#13/#14 + reconciler + reachability
+  já provados live** (deploy Vercel público). Trigger DB `trg_delivery_events_notify_n8n` +
+  dispatcher + 7 sub-workflows ativos no dev.
+- **Sessão 16 (em andamento — Phase 1 + design + Phase 2 trigger model live + Phase 3
+  sub-workflows provados live)**: WhatsApp outbound híbrido + n8n trigger model/contrato/live + sub-workflows provisionados. **Phase 1 (backend outbound) — PASS**: ADR-021
   (D1 provider híbrido DataCrazy+Evolution V2 [Bearer p/ conversa aberta, apikey+fallback
   flat #2570 p/ cold proactive]; D2 backend **envia+loga** via novo `POST /api/internal/
   notifications/send` [system, `x-internal-api-key`] — resolve destinatário, gera signed
@@ -389,12 +389,28 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   (wiring provado) + errou `ECONNREFUSED` = **gap honesto de reachability** (n8n público →
   backend localhost; tunnel/prod; handlers já provados via curl Sessão 14-15). `service_role`
   nunca no n8n (3 fronteiras auth); OTP plaintext nunca transita n8n (D5).
-  Hardening: `tsc` limpo; **175/175 vitest** (16 suítes, +2 regressões ledger). **Ressalva
-  (regra mestra — não simulado PASS)**: sub-workflows restantes (#6/#8/#10/#11/#12/#13/#14) +
-  reconciler scan workflow + **n8n→backend reachability** (backend localhost não alcançável
-  pelo n8n público — tunnel/deploy público; wiring provado, ECONNREFUSED esperado) + envio
-  WhatsApp real (credenciais Evolution/DataCrazy) — Phase 3. Geo 501 (Sessão 20). Storage RLS,
-  UI, rate limiting/mTLS → Sessões 17-19/22/26.
+  Hardening: `tsc` limpo; **175/175 vitest** (16 suítes, +2 regressões ledger). **Phase 3
+  (sub-workflows provados live — não simulado)**: deploy Vercel público
+  `https://vio10-frete.vercel.app` resolveu reachability (sem ECONNREFUSED — n8n público →
+  backend público). **8 fluxos backend provados end-to-end c/ chave real** (chave colada pelo
+  usuário em cada workflow): #2-enrich→501 geo, #6-offer→501 whatsapp, #10-assign→501, #11-update→501
+  (**+branch `in_transit`→otp** via Code "Build items" que emite 2 items p/ in_transit —
+  status_update+otp; 1 item p/ outros; backend `type:'otp'` → generate_delivery_otp interno,
+  otp_code não vaza ADR-022 D5), #12-notify→501, #13-confirm→422 pod_required, #14-failure→not_found,
+  #15-reconciler→200 scan. Dispatcher mapeia 7 webhook URLs (`in_transit` unificado → #11;
+  `round_closed`/`otp_generated`→NOOP — fix do loop latente #8). **3 bugs reais do n8n
+  httpRequest v4.2 achados+corrigidos+provados live**: (a) objeto literal aninhado
+  (`{metadata:{reason}}` em `JSON.stringify`) → `invalid syntax` → fix `JSON.parse('...')`
+  como valor; (b) delimitador `{{ }}` colide c/ `}}` no JSON string → `invalid syntax` →
+  mesmo fix; (c) **campo `url` c/ `{{ }}` inline NÃO resolve** → passa literal como path
+  param `[id]` → backend 500 `internal_error` (mascarado por 401 antes da chave real) → fix
+  URL em modo expressão `={{ '...'+$json.body.delivery_request_id+'/...' }}`. Lições gravadas
+  em `memory/n8n-live-infra.md` (#8-#11). `service_role` nunca no n8n (3 fronteiras auth);
+  OTP plaintext nunca transita n8n (D5). **Ressalva (regra mestra)**: #8-close + #9-nova-rodada
+  (bloqueado por geo 501 — `create_quote` precisa routing provider Sessão 20) + envio WhatsApp
+  real (credenciais Evolution/DataCrazy, ADR-021 D1 — hoje 501) + Phase 4 (docs/ADRs finais
+  + regressão DB 10/10 suítes — vitest 175/175 reconfirmado sem regressão). Geo 501 (Sessão
+  20). Storage RLS, UI, rate limiting/mTLS → Sessões 17-19/22/26.
 - **Sessão 15 (concluída)**: Endpoints driver/user-facing, signed links, webhook router,
   cookie/middleware full — **PASS (com ressalva)**. Camada de aplicação **pura** —
   **sem migration/RPC/enum/grant novo** (os 4 RPCs driver-facing — `respond_to_offer` (0016),

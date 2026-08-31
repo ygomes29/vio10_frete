@@ -11,10 +11,15 @@
 > (Sessão 16, ADR-022) + **trigger model provado live** (Sessão 16 Phase 2: pg_net egress,
 > dispatcher `VIO10-dispatcher` c/ validação de secret + roteamento por `event_type`, DB
 > trigger `trg_delivery_events_notify_n8n` sobre `delivery_events` INSERT → n8n, 4 event
-> types com `event_id` exato; sub-workflow `VIO10-#2-enrich` HTTP Request wiring provado —
-> `ECONNREFUSED` é gap de reachability, não arquitetura). **Sub-workflows restantes +
-> reconciler scan + n8n→backend reachability (tunnel/deploy público) + envio WhatsApp real**
-> → Phase 3. Não simulado (regra mestra).
+> types com `event_id` exato) + **sub-workflows provados live** (Sessão 16 Phase 3: deploy
+> Vercel público `https://vio10-frete.vercel.app` resolveu reachability — sem ECONNREFUSED;
+> 8 fluxos backend provados end-to-end c/ chave real: #2-enrich→501 geo, #6-offer→501
+> whatsapp, #10-assign→501, #11-update→501 (+branch `in_transit`→otp), #12-notify→501,
+> #13-confirm→422 pod_required, #14-failure→not_found, #15-reconciler→200 scan). 3 bugs
+> reais do n8n httpRequest v4.2 achados+corrigidos (objeto aninhado, delimitador `{{ }}`,
+> URL `{{ }}` inline não resolve). **Restante Phase 3**: #8-close + #9-nova-rodada
+> (bloqueado por geo 501 — Sessão 20) + envio WhatsApp real (credenciais Evolution/DataCrazy).
+> Não simulado (regra mestra).
 
 ## Regra obrigatória
 

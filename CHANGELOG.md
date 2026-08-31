@@ -83,6 +83,36 @@ Formato: sessão + data + escopo.
   Geo `/quote`+`/enrich` 501 (Sessão 20). Storage RLS comportamental, UI, rate
   limiting/mTLS → Sessões 17-19/22/26.
 
+### Phase 3 — sub-workflows provados live (não simulado)
+- **Reachability destravada**: deploy Vercel público `https://vio10-frete.vercel.app`
+  (Next.js, env vars server-side setadas) — n8n público → backend público, sem ECONNREFUSED.
+- **8 fluxos backend provados end-to-end c/ chave real** (`INTERNAL_API_KEY` colada pelo
+  usuário em cada workflow):
+  - `#2-enrich` (`zQsbwxwW9I8wD32L`) → `POST /deliveries/{id}/enrich` → 501 geo_provider.
+  - `#6-offer` (`Dnhh0QfgNllDUxbY`) → `POST /notifications/send` {offer} → 501 whatsapp.
+  - `#10-assign` (`LkEvTnM5CbJV9y7L`) → `POST /notifications/send` {assignment} → 501.
+  - `#11-update` (`H7FdzdAtyzmaqHSk`) → Webhook → Code "Build items" (emite status_update
+    sempre + otp se `in_transit`) → `POST /notifications/send` → 501; **branch in_transit→otp
+    provado** (2 items emitidos vs 1 p/ outros; backend `type:'otp'` → generate_delivery_otp
+    interno, otp_code não vaza ADR-022 D5).
+  - `#12-notify` (`2oqc2gwbcJMowcs4`) → `POST /notifications/send` {terminal} → 501.
+  - `#13-confirm` (`kVOnPyLnoCqcZ6QZ`) → `POST /deliveries/{id}/confirm` → 422 pod_required.
+  - `#14-failure` (`Mf9WMsRrmYW2nARd`) → `POST /deliveries/{id}/transitions` → not_found.
+  - `#15-reconciler` (`pH9LnGYVKYIEMY0z`, Schedule `*/5 * * * *`) → `POST /reconciler/scan` → 200.
+- **Dispatcher** (`8M68aj7oExxijS73`): mapeia 7 webhook URLs; `in_transit` unificado → #11;
+  `round_closed`/`otp_generated`/etc → NOOP (fix do loop latente #8 preservado).
+- **3 bugs reais do n8n httpRequest v4.2 achados+corrigidos+provados live**: (a) objeto
+  literal aninhado em `JSON.stringify` → `invalid syntax` → fix `JSON.parse('...')` como
+  valor (objeto single-level); (b) delimitador `{{ }}` colide c/ `}}` em JSON string →
+  `invalid syntax` → mesmo fix; (c) **campo `url` c/ `{{ }}` inline NÃO resolve** → passa
+  literal como path param `[id]` → backend 500 (mascarado por 401 antes da chave real) →
+  fix URL em modo expressão `={{ '...'+$json.body.delivery_request_id+'/...' }}`.
+- **Regressão**: vitest 175/175 (16 suítes) — sem regressão (nenhum código do repo mudou).
+- **Ressalva**: #8-close + #9-nova-rodada (bloqueado por geo 501 — Sessão 20) + WhatsApp
+  real (credenciais) + regressão DB 10/10 suítes. Pings de teste mutaram dev DB (delivery
+  `33333333-...` → failed; ledger entries via release-on-throw vazios) — harmless, re-reset
+  antes de produção.
+
 ## [Sessão 15] — 2026-08-29 — Endpoints driver/user-facing, signed links, webhook router, cookie/middleware full (ADR-020)
 
 > Camada de aplicação **pura** — sem migration/RPC/enum/grant novo. Os 4 RPCs driver-facing
