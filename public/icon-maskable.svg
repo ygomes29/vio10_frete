@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- maskable: safe zone ~80% center, full-bleed background -->
+  <rect width="512" height="512" fill="#3b6df6"/>
+  <path d="M176 176h32l48 144 48-144h32L272 360h-32L176 176z" fill="#ffffff"/>
+  <circle cx="336" cy="336" r="30" fill="#22c55e" stroke="#ffffff" stroke-width="10"/>
+</svg>

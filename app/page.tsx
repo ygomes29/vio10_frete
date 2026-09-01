@@ -1,11 +1,8 @@
-// Placeholder — UI vem nas Sessões 17-19 (PWA entregador / Painel / Portal).
-// Esta sessão (Sessão 14) constrói a camada de API (Route Handlers, ADR-019).
+import { redirect } from "next/navigation";
 
-export default function HomePage() {
-  return (
-    <main>
-      <h1>ViO10 — API</h1>
-      <p>Camada de API (Route Handlers). UI nas Sessões 17-19.</p>
-    </main>
-  );
+// Home redireciona à superfície do entregador (ADR-023 Fase 4). Middleware protege
+// /driver: sem sessão → 307 /auth/login. Admin/business chegam a /driver e daí a
+// landing por papel (Sessão 18/19 terão /admin, /business diretos).
+export default function HomePage(): never {
+  redirect("/driver");
 }

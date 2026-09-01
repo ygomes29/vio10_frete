@@ -377,9 +377,21 @@
     Storage RLS comportamental (Sessões 17-19), rate limiting/mTLS/rotação (Sessão 22/26), n8n
     implementação live (Sessão 16).
   - **Veredito**: GO para Sessão 16 (DataCrazy/WhatsApp outbound) ou Sessão 17 (UI).
-- **Próxima**: Sessão 16 — DataCrazy/WhatsApp outbound (envio de mensagens, OTP via WhatsApp,
-    embedding do signed link pelo n8n #6) ou Sessão 17 (UI Next.js — PWA entregador / Painel /
-  Portal).
+- **Sessão 17 (concluída)**: PWA Entregador — primeira UI + read-side do driver — **PASS**
+  (ADR-023). **Sem migration/RPC/enum/grant novo** (camada de aplicação pura). Tailwind v4 +
+  shadcn hand-rolled + PWA (manifest+SW) + login Server Action (redirect por role) +
+  read-side sem RPC (leitura direta RLS, 6 endpoints) + telemetria `driver_locations`
+  (WKT PostgREST) + UI PWA completa (home, detalhe c/ máquina de estados, histórico/ganhos).
+  `tsc` clean; **207/207** vitest; `next build` limpo; regressão DB 10/10 (zero regressão).
+  - **Ressalvas (declarado, não PASS)**: dispatch chain completo (geo 501 Sessão 20) — UI
+    via fixture SQL; POD foto/Storage RLS (Sessão 19/22); Realtime (polling MVP); UI admin
+    (Sessão 18) / portal business (Sessão 19).
+  - **Veredito**: GO para Sessão 18 (Dashboard admin) ou Sessão 20 (geo provider — destrava
+    dispatch chain e valida o PWA end-to-end sem fixture).
+- **Próxima**: Sessão 18 (Dashboard ViO10/admin) ou Sessão 20 (geo Google Maps — `/quote`+
+    `/enrich` do 501, dispatch chain completo, validação live do PWA sem fixture). Sessão 16
+    restante (#8-close/#9-nova-rodada bloqueado por geo 501; DataCrazy in-conversation; OTP
+    real ao recebedor). Sessão 19 (portal business).
 
 ## Roadmap (20 fases / 29 sessões)
 
@@ -394,7 +406,7 @@
 | 6. Ciclo completo | 11–12 | Máquina de estados + proof of delivery | — |
 | 7. n8n | 13–14 | Arquitetura + workflows | — |
 | 8. DataCrazy + WhatsApp | 15–16 | Agente de pedidos + notificações de oportunidade | — |
-| 9. PWA entregador | 17 | Interface mobile do entregador | — |
+| 9. PWA entregador | 17 | Interface mobile do entregador | ✅ |
 | 10. Painel operacional | 18 | Dashboard ViO10 | — |
 | 11. Portal empresa | 19 | Portal do cliente | — |
 | 12. Mapas/RT | 20 | Geo, rotas, ETA, mapa operacional | — |

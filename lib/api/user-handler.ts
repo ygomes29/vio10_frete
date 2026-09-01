@@ -77,3 +77,51 @@ export async function handleUserPost(request: Request, opts: UserHandlerOpts): P
 export function idempotencyKeyOf(request: Request): string | null {
   return getIdempotencyHeaders(request).idempotencyKey;
 }
+
+// ---------------------------------------------------------------------------
+// GET (read-side driver) — ADR-023 Fase 3. Espelho do handleUserPost sem parse
+// de body (GET não tem body). `run` retorna um RpcResult-shaped: sucesso como
+// `{ ok: true, reason: null, ...payload }` (toApiResponse espalha + força ok);
+// erro como `{ ok: false, reason }` (not_authorized→403, not_found→422...).
+// Sem idempotency ledger (D7) e sem RPC (leitura direta via RLS, exceto mutação
+// de telemetria que usa POST). `url` repassado p/ searchParams (ex.: ?limit=).
+// ---------------------------------------------------------------------------
+
+type UserGetOpts = {
+  eventType: string;
+  run: (correlationId: string, url: URL, ctx: UserCtx) => Promise<RpcResult>;
+  sensitive?: boolean;
+};
+
+export async function handleUserGet(request: Request, opts: UserGetOpts): Promise<Response> {
+  const correlationId = getCorrelationId(request);
+  const client = await createServerClient();
+  const { data: { user } } = await client.auth.getUser();
+  if (!user) {
+    logEvent({ correlation_id: correlationId, event: opts.eventType, error: "unauthenticated" });
+    return jsonResponse(401, { ok: false, reason: "unauthenticated", correlation_id: correlationId });
+  }
+  try {
+    const url = new URL(request.url);
+    const result = await opts.run(correlationId, url, { user, client });
+    const api = toApiResponse(result, { correlation_id: correlationId });
+    logEvent({
+      correlation_id: correlationId,
+      event: opts.eventType,
+      ok: result.ok,
+      reason: result.reason,
+    });
+    return jsonResponse(api.status, api.body);
+  } catch (e) {
+    if (e && typeof e === "object" && "reason" in e && "status" in e &&
+        typeof (e as { status: unknown }).status === "number") {
+      const ne = e as { reason: string; status: number };
+      logEvent({ correlation_id: correlationId, event: opts.eventType, error: ne.reason, status: ne.status });
+      return jsonResponse(ne.status, { ok: false, reason: ne.reason, correlation_id: correlationId });
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    const pgcode = (e as { pgcode?: string }).pgcode;
+    logEvent({ correlation_id: correlationId, event: opts.eventType, error: msg, pgcode });
+    return jsonResponse(500, { ok: false, reason: "internal_error", correlation_id: correlationId });
+  }
+}

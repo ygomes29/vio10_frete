@@ -22,14 +22,49 @@ Stack de UI: TypeScript, Tailwind CSS, shadcn/ui.
 
 ## 3. PWA do entregador
 
+> **Implementado na Sessão 17 (ADR-023).** Stack: Tailwind CSS v4 + shadcn/ui
+> hand-rolled (`cva`+`cn`), route group `app/(driver)/...`, login via Server Action
+> (`signInWithPassword`, redirect por role), PWA via `app/manifest.ts` + service
+> worker (`public/sw.js`) + `<PWARegister/>`. **Nenhum client Supabase no
+> browser** — toda auth é server-side (cookie httpOnly); leitura/escrita por Route
+> Handlers same-origin. Atualizações por **polling** (10s, foreground); Realtime
+> adiado.
+
 Prioridade absoluta: **uso rápido no celular**. Botões grandes, mínimo de cliques,
 excelente mobile, estados de loading/erro/sucesso, tolerância a conexão instável,
-proteção contra clique duplicado.
+proteção contra clique duplicado (idempotência real no backend — ADR-020 D7; o disable
+na UI é UX).
 
 Fluxos: login → disponível/indisponível → oportunidade atual → ACEITAR/RECUSAR/
 FAZER LANCE → corrida atribuída → navegar até coleta → cheguei → produto coletado →
 iniciar entrega → navegar até destino → concluir entrega → prova de entrega →
 histórico básico → ganhos básicos.
+
+### Páginas e componentes (Sessão 17)
+
+- `app/auth/login/{page,actions}.tsx` — login Server Action + redirect por role
+  (`/admin` | `/driver` | `/business`).
+- `app/(driver)/layout.tsx` — header (logo + Histórico + Logout) + `<PWARegister/>`
+  + safe-area.
+- `app/(driver)/driver/page.tsx` — home (Server Component): corrida ativa →
+  `<ActiveDeliveryCard/>`; senão → `<AvailabilityToggle/>` + `<OpportunityPanel/>`.
+- `app/(driver)/driver/delivery/[id]/page.tsx` — detalhe (Server Component) →
+  `<DeliveryStateMachine/>` (client): botões por estado, POD pickup (notes) / POD
+  delivery (receiver_name + otp_code), polling do estado oficial.
+- `app/(driver)/driver/history/page.tsx` — histórico + ganhos (30d).
+- Componentes: `components/driver/{availability-toggle,opportunity-panel,
+  active-delivery-card,delivery-state-machine,location-tracker,logout-button}.tsx`;
+  `lib/hooks/use-driver-location.ts`; `lib/client/fetcher.ts` (`apiGet`/`apiPost`);
+  `lib/server/driver-context.ts` (`getDriverContext`).
+- Primitivas UI: `components/ui/{button,card,input,label,badge,skeleton}.tsx`.
+
+### Read-side do driver (ADR-023 D1 — sem RPC)
+
+Leitura direta via client user-scoped (cookie JWT, RLS). **Sem RPC/enum/grant novo.**
+Endpoints: `GET /api/driver/{me,opportunity,deliveries/active,deliveries/history,
+earnings}` + `POST /api/driver/location` (telemetria — única mutação direta do
+`authenticated`, RLS `driver_id = my_driver_id()`). Handler `handleUserGet`
+(`lib/api/user-handler.ts`); service `lib/services/driver-reads.ts`.
 
 ### Localização do entregador
 

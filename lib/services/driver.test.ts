@@ -4,6 +4,7 @@ import {
   validatePodBody,
   validateTransitionBody,
   validateAvailabilityBody,
+  validateDriverLocationBody,
 } from "./driver";
 
 describe("validateRespondOfferBody", () => {
@@ -107,5 +108,59 @@ describe("validateAvailabilityBody", () => {
   });
   it("reason string válido", () => {
     expect(validateAvailabilityBody({ status: "paused", reason: "almoco" })).toEqual({ valid: true });
+  });
+});
+
+describe("validateDriverLocationBody", () => {
+  it("aceita lat/lng/captured_at válidos", () => {
+    expect(
+      validateDriverLocationBody({ latitude: -23.6, longitude: -46.7, captured_at: "2026-08-31T00:00:00Z" }),
+    ).toEqual({ valid: true });
+  });
+  it("aceita campos opcionais finitos", () => {
+    expect(
+      validateDriverLocationBody({
+        latitude: 0,
+        longitude: 0,
+        captured_at: "2026-08-31T00:00:00Z",
+        accuracy_m: 10,
+        heading_deg: 90,
+        speed_mps: 5,
+      }),
+    ).toEqual({ valid: true });
+  });
+  it("rejeita lat fora do range", () => {
+    expect(
+      validateDriverLocationBody({ latitude: 91, longitude: 0, captured_at: "x" }),
+    ).toEqual({ valid: false, reason: "invalid_param" });
+  });
+  it("rejeita lng fora do range", () => {
+    expect(
+      validateDriverLocationBody({ latitude: 0, longitude: 181, captured_at: "x" }),
+    ).toEqual({ valid: false, reason: "invalid_param" });
+  });
+  it("rejeita lat não-finito (NaN)", () => {
+    expect(
+      validateDriverLocationBody({ latitude: NaN, longitude: 0, captured_at: "x" }),
+    ).toEqual({ valid: false, reason: "invalid_param" });
+  });
+  it("rejeita sem captured_at", () => {
+    expect(
+      validateDriverLocationBody({ latitude: 0, longitude: 0 }),
+    ).toEqual({ valid: false, reason: "invalid_param" });
+  });
+  it("rejeita accuracy_m não-numérico", () => {
+    expect(
+      validateDriverLocationBody({ latitude: 0, longitude: 0, captured_at: "x", accuracy_m: "abc" }),
+    ).toEqual({ valid: false, reason: "invalid_param" });
+  });
+  it("aceita opcionais null/undefined", () => {
+    expect(
+      validateDriverLocationBody({ latitude: 0, longitude: 0, captured_at: "x", accuracy_m: null, heading_deg: undefined }),
+    ).toEqual({ valid: true });
+  });
+  it("rejeita body não-objeto", () => {
+    expect(validateDriverLocationBody(null)).toEqual({ valid: false, reason: "invalid_param" });
+    expect(validateDriverLocationBody("x")).toEqual({ valid: false, reason: "invalid_param" });
   });
 });

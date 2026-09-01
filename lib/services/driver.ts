@@ -127,6 +127,41 @@ export function validateAvailabilityBody(body: unknown): ValidationResult {
 
 // ---- Resolução de driver (user-scoped) ----
 
+export type DriverLocationInput = {
+  latitude: number;
+  longitude: number;
+  accuracyM?: number | null;
+  headingDeg?: number | null;
+  speedMps?: number | null;
+  capturedAt: string; // ISO do dispositivo
+};
+
+/** Valida body de `POST /api/driver/location` (telemetria — ADR-023 Fase 3). */
+export function validateDriverLocationBody(body: unknown): ValidationResult {
+  if (!body || typeof body !== "object") return { valid: false, reason: "invalid_param" };
+  const b = body as Record<string, unknown>;
+  const lat = b.latitude;
+  const lng = b.longitude;
+  if (typeof lat !== "number" || !Number.isFinite(lat) || Math.abs(lat) > 90) {
+    return { valid: false, reason: "invalid_param" };
+  }
+  if (typeof lng !== "number" || !Number.isFinite(lng) || Math.abs(lng) > 180) {
+    return { valid: false, reason: "invalid_param" };
+  }
+  if (typeof b.captured_at !== "string" || !b.captured_at) {
+    return { valid: false, reason: "invalid_param" };
+  }
+  for (const k of ["accuracy_m", "heading_deg", "speed_mps"] as const) {
+    const v = b[k];
+    if (v !== undefined && v !== null && (typeof v !== "number" || !Number.isFinite(v))) {
+      return { valid: false, reason: "invalid_param" };
+    }
+  }
+  return { valid: true };
+}
+
+// ---- Resolução de driver (user-scoped) ----
+
 /**
  * Resolve o `drivers.id` a partir do `user_id` (auth.uid). O client deve ser
  * user-scoped (cookie JWT) — RLS deixa o driver ver a própria linha. Retorna

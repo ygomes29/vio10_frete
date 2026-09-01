@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { handleUserPost } from "./user-handler";
+import { handleUserPost, handleUserGet } from "./user-handler";
 import type { RpcResult } from "@/lib/rpc/result";
 
 /**
@@ -122,5 +122,67 @@ describe("handleUserPost", () => {
     const res = await handleUserPost(req, { eventType: "t", run });
     expect(res.status).toBe(200);
     expect(run.mock.calls[0][1]).toBeNull();
+  });
+});
+
+describe("handleUserGet", () => {
+  it("sem cookie (user null) → 401 unauthenticated, NÃO chama run", async () => {
+    getUserMock.mockResolvedValue({ data: { user: null } });
+    const run = vi.fn();
+    const req = new Request("http://localhost/api/driver/me", { method: "GET" });
+    const res = await handleUserGet(req, { eventType: "driver.read", run });
+    expect(res.status).toBe(401);
+    const j = await res.json();
+    expect(j.reason).toBe("unauthenticated");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("user válido → chama run c/ correlation_id, url, ctx; ok→200 espalha payload", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } } });
+    const run = vi.fn(async (_c: string, _u: URL, _ctx: { user: { id: string } }) => ({ ok: true, reason: null, me: { id: "d1" } } as RpcResult));
+    const req = new Request("http://localhost/api/driver/me?x=1", { method: "GET" });
+    const res = await handleUserGet(req, { eventType: "driver.read", run });
+    expect(res.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(1);
+    const [corr, url, ctx] = run.mock.calls[0];
+    expect(corr).toEqual(expect.any(String));
+    expect(url!.pathname).toBe("/api/driver/me");
+    expect(url!.searchParams.get("x")).toBe("1");
+    expect(ctx!.user.id).toBe("u1");
+    const j = await res.json();
+    expect(j.ok).toBe(true);
+    expect(j.me.id).toBe("d1");
+  });
+
+  it("run retorna ok:false reason → status mapeado (403 not_authorized)", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } } });
+    const run = vi.fn(async () => ({ ok: false, reason: "not_authorized" } as RpcResult));
+    const res = await handleUserGet(new Request("http://localhost/api/driver/me"), { eventType: "driver.read", run });
+    expect(res.status).toBe(403);
+  });
+
+  it("run retorna not_found → 422", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } } });
+    const run = vi.fn(async () => ({ ok: false, reason: "not_found" } as RpcResult));
+    const res = await handleUserGet(new Request("http://localhost/api/driver/me"), { eventType: "driver.read", run });
+    expect(res.status).toBe(422);
+  });
+
+  it("run lança exceção → 500 internal_error", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } } });
+    const run = vi.fn(async () => { throw new Error("boom"); });
+    const res = await handleUserGet(new Request("http://localhost/api/driver/me"), { eventType: "driver.read", run });
+    expect(res.status).toBe(500);
+    const j = await res.json();
+    expect(j.reason).toBe("internal_error");
+  });
+
+  it("run lança erro c/ status+reason explícitos → esse status (501)", async () => {
+    getUserMock.mockResolvedValue({ data: { user: { id: "u1" } } });
+    const err = Object.assign(new Error("geo"), { reason: "geo_provider_not_configured", status: 501 });
+    const run = vi.fn(async () => { throw err; });
+    const res = await handleUserGet(new Request("http://localhost/api/driver/me"), { eventType: "driver.read", run });
+    expect(res.status).toBe(501);
+    expect((await res.json()).reason).toBe("geo_provider_not_configured");
   });
 });

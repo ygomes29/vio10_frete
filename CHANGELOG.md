@@ -2,6 +2,90 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 17] — 2026-08-31 — PWA Entregador (read-side sem RPC, polling, login Server Action, manifest+SW) — ADR-023
+
+> Primeira UI do ViO10 + read-side do driver. **Sem migration/RPC/enum/grant novo**
+> (camada de aplicação pura, como Sessão 15). Os 4 RPCs driver-facing são finais desde
+> Sessões 09-12; RLS já liberava o read-side (`can_view_delivery_request`,
+> `my_driver_id()`); `driver_locations` é a única mutação direta do `authenticated`.
+
+### Entrega
+- **Fase 1 — UI stack**: Tailwind CSS v4 (`@tailwindcss/postcss` + `@import
+  "tailwindcss"` + `@custom-variant dark` + `@theme inline`) + shadcn/ui hand-rolled
+  (`components/ui/{button,card,input,label,badge,skeleton}.tsx` c/ `cva`+`cn`).
+  `lib/utils.ts` (`cn`,`formatBRL`,`formatDistance`,`formatDuration`). `app/layout.tsx`
+  metadata/viewport (themeColor, `userScalable:false`, `viewportFit:cover`).
+  `app/manifest.ts` (start_url `/driver`, standalone, icons SVG). `public/sw.js`
+  (network-first navegação, no `/api/*` cache, SWR statics) + `<PWARegister/>`.
+  `public/{icon,icon-maskable}.svg`, `public/offline.html`.
+- **Fase 2 — Auth real**: `app/auth/login/{page,actions}.tsx` — Server Action `signIn`
+  (`signInWithPassword` + `resolveLandingPath` por role → `/admin`|`/driver`|`/business`;
+  sem role → `signOut` + mensagem) + `signOut`. `useActionState`. **Nenhum client
+  Supabase no browser** (auth server-side, cookie httpOnly).
+- **Fase 3 — Read-side + telemetria**: `handleUserGet` (`lib/api/user-handler.ts`,
+  espelho do POST sem body). `lib/services/driver-reads.ts`
+  (`getDriverMe`/`getDriverOpportunity`/`getActiveDelivery`/`getDeliveryHistory`/
+  `getEarnings`/`upsertDriverLocation`). `validateDriverLocationBody` (`lib/services/
+  driver.ts`). 6 endpoints: `GET /api/driver/{me,opportunity,deliveries/active,
+  deliveries/history,earnings}` + `POST /api/driver/location` (upsert `driver_locations`,
+  WKT `POINT(lng lat)` via PostgREST, RLS `driver_id=my_driver_id()`).
+- **Fase 4 — UI PWA** (`app/(driver)/...`): `layout.tsx` (header+PWARegister+safe-area),
+  `driver/page.tsx` (home Server Component: corrida ativa → `<ActiveDeliveryCard/>`;
+  senão → `<AvailabilityToggle/>` + `<OpportunityPanel/>` polling 10s c/
+  ACEITAR/RECUSAR/LANCE), `driver/delivery/[id]/page.tsx` (detalhe Server Component) →
+  `<DeliveryStateMachine/>` (client: botões por estado, POD pickup=notes / POD
+  delivery=receiver_name+otp_code, polling do estado oficial, **driver não marca
+  `delivered`** — sistema via `confirm_delivery`), `driver/history/page.tsx` (histórico
+  + ganhos 30d). Hooks/components: `use-driver-location.ts` (foreground-only),
+  `lib/client/fetcher.ts` (`apiGet`/`apiPost`), `lib/server/driver-context.ts`,
+  `components/driver/{availability-toggle,opportunity-panel,active-delivery-card,
+  delivery-state-machine,location-tracker,logout-button}.tsx`.
+
+### Validação
+- `tsc --noEmit` clean; **207/207** vitest PASS (17 suítes, +32 novos:
+  `handleUserGet`, `driver-reads` 17, `validateDriverLocationBody` 9); `next build`
+  limpo (todas as rotas: `/driver`, `/driver/delivery/[id]`, `/driver/history`,
+  `/manifest.webmanifest`).
+- Regressão DB 10/10 suítes (zero regressão — nada toca o DB).
+- **Live vertical slice (dev, real — não simulado)** via `next dev` + curl + Auth Admin
+  API (user de teste `vio10driver17@example.com` c/ `drivers`/`vehicles` via SQL, email
+  confirmado via Admin API p/ bypass do rate limit de signUp):
+  - GET (cookie JWT): `/me` 200 (perfil + availability + veículo); `/opportunity` 200
+    (sem offer pendente → `null`); `/deliveries/active` 200 (`active:null`); `/history`
+    200 (`deliveries:[]`); `/earnings` 200 (`total_cents:0, count:0`).
+  - `POST /location` 200 → `driver_locations` row verificada no DB (RLS
+    `driver_id=my_driver_id()`, `position` geography `POINT(-46.7 -23.6)`,
+    `accuracy_m=15`).
+  - Auth/middleware: sem cookie → `/api/driver/*` 401, `/driver` 307
+    `/auth/login?redirect=/driver`; com cookie → `/driver` 200, `/driver/history` 200,
+    `/driver/delivery/fake` 307 (sem active).
+  - PWA: `GET /manifest.webmanifest` 200 (`start_url:/driver`, `display:standalone`);
+    `GET /sw.js` 200 (service worker servido da raiz).
+- **2 bugs reais achados+corrigidos durante a validação live** (o teste unitário mock
+  não os pegou — prova do valor de "não simulado"):
+  1. **PGRST200 join nesting** (`/deliveries/active` + `/deliveries/history` 422
+     `internal_error`): `delivery_offers!delivery_offer_id(driver_offer_cents)` e
+     `bids!bid_id(bid_amount_cents)` estavam aninhados **dentro** do select de
+     `delivery_requests(...)`, mas a FK parte de `delivery_assignments` (root), não de
+     `delivery_requests` → PostgREST "Could not find a relationship between
+     'delivery_requests' and 'delivery_offers'". Fix: movidos para top-level em
+     `lib/services/driver-reads.ts` (`delivery_events`/`proof_of_delivery` ficam aninhados
+     em `delivery_requests` — FK correta).
+  2. **SW 404**: `new URL('../lib/service-worker.js', import.meta.url)` não emite um
+     asset servível de SW (404). Fix: SW movido para `public/sw.js` + registro por
+     `/sw.js` (`components/pwa-register.tsx`) — padrão doc Next 16 (SW em `public/` é
+     servido na raiz).
+- **Não simulado** (regra mestra): ADR-023 D9 — dispatch chain completo bloqueado por
+  geo 501 (Sessão 20); a UI é exercitada contra estado real injetado por fixture SQL +
+  mutações nos endpoints já provados (Sessão 15), não se simula PASS do dispatch chain.
+
+### Ressalva (regra mestra)
+- Dispatch chain completo (quote→searching→offer→assigned) **não validado live**
+  (geo 501, Sessão 20) — UI exercitada via fixture SQL.
+- POD foto / Storage RLS comportamental → Sessão 19/22 (MVP: OTP + notes).
+- Realtime → futura (polling no MVP). UI admin (Sessão 18) / portal business (Sessão 19)
+  fora desta sessão.
+
 ## [Sessão 16] — 2026-08-31 — WhatsApp outbound híbrido + n8n trigger model/contrato/live (ADR-021, ADR-022) — Phase 1 + design + Phase 2 trigger model
 
 > **Phase 1 (backend outbound) + design/contrato n8n + Phase 2 (trigger model live)

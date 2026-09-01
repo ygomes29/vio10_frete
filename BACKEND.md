@@ -705,3 +705,41 @@ Live vertical slice `next dev`+curl (auth driver cookie, endpoints driver, 401 s
 signed link generator+respond+expirado/tampered+replay, webhook signature/dedup/inválida,
 middleware redirect) — ver CHANGELOG. **Não simulado** (regra mestra). UI/WhatsApp outbound/
 Storage comportamental = **deferred** (Sessões 16-20).
+
+## 12. Read-side do driver + telemetria (Sessão 17 — ADR-023)
+
+### 12.1 Read-side sem RPC (D1)
+
+A Sessão 15 entregou o **write-side** driver (4 RPCs finais desde Sessões 09-12). A
+Sessão 17 entrega o **read-side** — **sem RPC/enum/grant/migration novo**: leitura
+direta via client user-scoped (cookie JWT, `auth.uid()`, RLS `can_view_delivery_request`
++ `my_driver_id()`). Novo `handleUserGet` em `lib/api/user-handler.ts` (espelho do
+`handleUserPost` sem parse de body): `getUser`→401 se null → `run(correlationId, url,
+ctx)` → `toApiResponse`; `url` repassado p/ `searchParams`. Sem idempotency ledger (D7).
+
+Service `lib/services/driver-reads.ts` (cada fn retorna `RpcResult`-shaped):
+`getDriverMe`, `getDriverOpportunity` (offers `status='pending'` AND `expires_at>now()`,
+join `delivery_requests`+`delivery_quotes`+`delivery_items`), `getActiveDelivery`
+(assignment ativa, `ended_at is null`, status em `assigned..in_transit`; preço via join
+`delivery_offer_id→delivery_offers.driver_offer_cents` ou `bid_id→bids.bid_amount_cents`
+— assignment não tem coluna de preço), `getDeliveryHistory` (encerradas, limit clamp
+[1,50]), `getEarnings` (soma `delivered` últimos 30d). `resolveDriverId`→403
+`not_authorized` se não driver.
+
+Endpoints: `GET /api/driver/{me,opportunity,deliveries/active,deliveries/history,earnings}`.
+
+### 12.2 Telemetria (D8 — `driver_locations`)
+
+`POST /api/driver/location` — upsert direto em `driver_locations` (RLS
+`driver_id = my_driver_id()`, 0015/0017 — **única** mutação direta do `authenticated`).
+`position` é `geography(Point,4326)`; PostgREST aceita WKT `POINT(lng lat)` (lng
+primeiro, space-separated, sem vírgula) — **sem RPC**. `validateDriverLocationBody`
+(lat/lng finitos, |lat|≤90, |lng|≤180, `captured_at` ISO, opcionais finitos). A UI só
+posta em foreground durante corrida ativa (D8).
+
+### 12.3 Validação
+
+`tsc --noEmit` clean; **207/207** vitest PASS (+`handleUserGet`, +`driver-reads`,
++`validateDriverLocationBody`); `next build` limpo (todas as rotas). Regressão DB
+10/10 suítes (zero regressão — nada toca o DB). **Não simulado** (regra mestra).
+Dispatch chain completo (geo 501) e POD foto = **deferred** (Sessão 20 / 19-22).

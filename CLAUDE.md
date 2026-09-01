@@ -327,13 +327,11 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   links) + webhook router DataCrazy + cookie/refresh/middleware full → **Sessão 15**
   (declarado, não PASS). Provider Google Maps real → **Sessão 20** (501 hoje). n8n
   implementação reabre com Route Handlers + WhatsApp.
-- **Próxima**: Sessão 16 Phase 3 (restante) — sub-workflow #8-close (Wait/SWAC,
-  `/dispatch/rounds/{id}/close`) + #9-nova-rodada encadeado (**bloqueado por geo 501** —
-  `create_quote` precisa routing provider, Sessão 20) + **envio WhatsApp real PROVEN live
-  (Evolution cold, Estágios 1+2a+2b — restam DataCrazy in-conversation + OTP real ao recebedor)**
-  + Phase 4 (docs/ADRs finais + regressão DB 10/10 suítes). **Phase 3 sub-workflows
-  #6/#10/#11/#12/#13/#14 + reconciler + reachability já provados live** (deploy Vercel público).
-  Trigger DB `trg_delivery_events_notify_n8n` + dispatcher + 7 sub-workflows ativos no dev.
+- **Próxima**: Sessão 18 (Dashboard admin) ou Sessão 20 (geo provider Google Maps —
+  destrava `/quote`+`/enrich` do 501 e o dispatch chain completo, validando live o PWA
+  end-to-end sem fixture). Sessão 16 restante: #8-close + #9-nova-rodada (bloqueado por
+  geo 501) + DataCrazy in-conversation + OTP real ao recebedor. Sessão 19 (portal business).
+  **Sessão 17 (PWA Entregador) concluída** — ver abaixo.
 - **Sessão 16 (em andamento — Phase 1 + design + Phase 2 trigger model live + Phase 3
   sub-workflows provados live)**: WhatsApp outbound híbrido + n8n trigger model/contrato/live + sub-workflows provisionados. **Phase 1 (backend outbound) — PASS**: ADR-021
   (D1 provider híbrido DataCrazy+Evolution V2 [Bearer p/ conversa aberta, apikey+fallback
@@ -465,6 +463,43 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   WhatsApp outbound real (Sessão 16), provider Google Maps (Sessão 20 — `/quote`+`/enrich`
   501), Storage RLS comportamental (Sessões 17-19), rate limiting/mTLS/rotação (Sessão 22/26),
   n8n implementação live (Sessão 16 + reabertura n8n).
+- **Sessão 17 (concluída)**: PWA Entregador — primeira UI + read-side do driver —
+  **PASS**. **Sem migration/RPC/enum/grant novo** (camada de aplicação pura, como
+  Sessão 15). **ADR-023** (D1 read-side sem RPC — leitura direta via client user-scoped
+  [RLS `can_view_delivery_request`/`my_driver_id()`], exceto `driver_locations`
+  telemetria; D2 polling > Realtime no MVP [10s foreground, nenhum client Supabase no
+  browser]; D3 login Server Action + redirect por role [`/admin`|`/driver`|`/business`];
+  D4 PWA manifest+SW+route group `(driver)`; D5 POD OTP [delivery] + notes [pickup], foto
+  adiada; D6 sem migration; D7 frontend só apresenta estado oficial; D8 localização só
+  foreground; D9 validação fixture-based [geo 501 bloqueia dispatch chain]). Entrega:
+  Tailwind v4 + shadcn hand-rolled (`components/ui/*`) + `lib/utils.ts` + `app/layout.tsx`
+  + `app/manifest.ts` + `public/sw.js` + `<PWARegister/>` (Fase 1); login Server
+  Action `signIn`/`signOut` + `resolveLandingPath` (Fase 2); `handleUserGet` +
+  `lib/services/driver-reads.ts` (getDriverMe/getDriverOpportunity/getActiveDelivery/
+  getDeliveryHistory/getEarnings/upsertDriverLocation) + `validateDriverLocationBody` +
+  6 endpoints (`GET /api/driver/{me,opportunity,deliveries/active,deliveries/history,
+  earnings}` + `POST /api/driver/location` [WKT `POINT(lng lat)` PostgREST, RLS]) (Fase 3);
+  UI PWA `app/(driver)/{layout,driver/page,driver/delivery/[id]/page,driver/history/page}`
+  + componentes (`availability-toggle`,`opportunity-panel`,`active-delivery-card`,
+  `delivery-state-machine` [driver não marca `delivered` — sistema via confirm_delivery],
+  `location-tracker`,`logout-button`) + `use-driver-location.ts` + `lib/client/fetcher.ts`
+  + `lib/server/driver-context.ts` (Fase 4). Hardening: `tsc` clean; **207/207** vitest
+  (17 suítes, +32 novos); `next build` limpo; regressão DB 10/10 suítes (zero regressão,
+  nada toca o DB). `service_role` nunca vaza ao client (user-scoped, cookie JWT).
+  **Validação live (dev, real — não simulado)**: vertical slice `next dev`+curl+Auth
+  Admin API — GET `/me`/`/opportunity`/`/deliveries/active`/`/history`/`/earnings` 200
+  (cookie JWT), `POST /location` 200 → `driver_locations` row verificada no DB
+  (`position` geography `POINT(lng lat)`, RLS `my_driver_id()`), sem cookie 401/307,
+  com cookie `/driver`+`/driver/history` 200, `/manifest.webmanifest`+`/sw.js` 200.
+  **2 bugs reais achados+corrigidos na validação live** (mock unitário não pegou — prova
+  do "não simulado"): (1) **PGRST200** — `delivery_offers!delivery_offer_id`/`bids!bid_id`
+  aninhados em `delivery_requests(...)` mas FK parte de `delivery_assignments` (root) →
+  422 `internal_error`; movidos p/ top-level em `driver-reads.ts`. (2) **SW 404** —
+  `new URL('../lib/service-worker.js', import.meta.url)` não emite asset servível; SW
+  movido p/ `public/sw.js` + registro `/sw.js` (padrão doc Next 16).
+  **Ressalva (regra mestra — não simulado PASS)**: dispatch chain completo não validado
+  live (geo 501 Sessão 20) — UI via fixture SQL (D9); POD foto/Storage RLS → Sessão 19/22;
+  Realtime → futura (polling MVP); UI admin (Sessão 18) / portal business (Sessão 19).
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.
 
