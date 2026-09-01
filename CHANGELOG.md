@@ -111,7 +111,7 @@ Formato: sessão + data + escopo.
 - **Ressalva**: #8-close + #9-nova-rodada (bloqueado por geo 501 — Sessão 20) + WhatsApp
   real (credenciais) + regressão DB 10/10 suítes. Pings de teste mutaram dev DB (delivery
   `33333333-...` → failed; ledger entries via release-on-throw vazios) — harmless, re-reset
-  antes de produção.
+  antes de produção. → **WhatsApp real + regressão DB resolvidos na Phase 3b/4 (ver abaixo)**.
 
 ### Phase 3b — WhatsApp real proven live (Evolution cold, não simulado)
 - **Provider Evolution V2 configurado no Vercel** (env vars server-side `EVOLUTION_API_URL`,
@@ -150,6 +150,26 @@ Formato: sessão + data + escopo.
   `in_transit` — bloqueado por geo 501 no fluxo normal, só via fixture SQL direta) não validados
   live. Evolution cobre todo cold (crítico). `service_role` nunca no n8n (3 fronteiras auth);
   OTP plaintext nunca transita n8n (ADR-022 D5).
+
+### Phase 4 — regressão DB 10/10 + dev DB limpo (não simulado)
+- **Reset via SQL + replay 0001→0029 limpo (29/29)**: `drop schema public cascade` + `delete
+  auth.users` + replay 29 migrations. 0029 (schema-prep `whatsapp_conversations` +
+  `notifications.recipient_phone`) replaya sem tocar RPCs → zero regressão esperada.
+- **Inventário pós-replay**: 28 tabelas (+`whatsapp_conversations` vs 27 na Sessão 12), 28/28
+  RLS, `notifications.recipient_phone` presente, `notifications_at_least_one_recipient_chk`
+  presente, `whatsapp_conversations` c/ RLS, `anon`=0 em public, `authenticated` sem grants
+  em `whatsapp_conversations` (default-deny). Conforme o esperado.
+- **10 suítes de regressão PASS (418 asserções)**: invariants 13/13, rpcs 48/48, authz 21/21,
+  auth_lifecycle 34/34, creation 37/37, pricing 62/62, dispatch 65/65, bid 61/61, lifecycle
+  67/67, pod_completo 40/40 — **10/10, zero regressão**. Runner `supabase/tests/verify_sessao16.sh`.
+- **vitest 175/175** (16 suítes) — sem regressão no fix `encodeURIComponent`.
+- **Trigger n8n restaurado pós-reset**: `trg_delivery_events_notify_n8n` + função
+  `notify_n8n_delivery_event` (SECURITY DEFINER, `net.http_post` ao dispatcher) são infra de
+  runtime, **não** migration — não sobrevivem a reset+replay. DDL dumpada do estado provado live
+  (Estágio 2b) e reaplicada via Management API; `func=1, trg=1, enabled=O`, `pg_net` (schema
+  `net`) intacto. Cadeia n8n restaurada estruturalmente (DDL idêntica + componentes inalterados).
+- **dev DB limpo**: reset eliminou a poluição de teste (delivery `33333333-...`, rows em
+  `notifications`, ledger entries) — estado correto pré-produção.
 
 ## [Sessão 15] — 2026-08-29 — Endpoints driver/user-facing, signed links, webhook router, cookie/middleware full (ADR-020)
 

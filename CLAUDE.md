@@ -414,8 +414,10 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   `+5531997722783`; fix `encodeURIComponent` no `evolution-provider.ts:28`, instância
   `Olivia - NEA`)** — restam DataCrazy in-conversation (janela 24h, só c/ conversa real
   iniciada pelo usuário — não sintetizável) + OTP real ao recebedor (`type:otp`, precisa delivery
-  em `in_transit` — bloqueado por geo 501 no fluxo normal) + Phase 4 (docs/ADRs finais
-  + regressão DB 10/10 suítes — vitest 175/175 reconfirmado sem regressão). Geo 501 (Sessão
+  em `in_transit` — bloqueado por geo 501 no fluxo normal). **Phase 4 DONE: regressão DB
+  10/10 suítes PASS (418 asserções, replay 0001→0029 limpo 29/29, inventário 28 tabelas/28 RLS/
+  `anon`=0; vitest 175/175 sem regressão)**; trigger n8n `trg_delivery_events_notify_n8n`
+  restaurado pós-reset (DDL idêntica, `enabled=O`, `pg_net` intacto). Geo 501 (Sessão
   20). Storage RLS, UI, rate limiting/mTLS → Sessões 17-19/22/26.
 - **Sessão 15 (concluída)**: Endpoints driver/user-facing, signed links, webhook router,
   cookie/middleware full — **PASS (com ressalva)**. Camada de aplicação **pura** —
