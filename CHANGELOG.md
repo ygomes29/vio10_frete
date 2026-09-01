@@ -113,6 +113,44 @@ Formato: sessão + data + escopo.
   `33333333-...` → failed; ledger entries via release-on-throw vazios) — harmless, re-reset
   antes de produção.
 
+### Phase 3b — WhatsApp real proven live (Evolution cold, não simulado)
+- **Provider Evolution V2 configurado no Vercel** (env vars server-side `EVOLUTION_API_URL`,
+  `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE_NAME=Olivia - NEA` — instância pública/https,
+  número conectado `553185088086`). Híbrido ADR-021 D1: cold → Evolution; conversa aberta →
+  DataCrazy.
+- **Estágio 1 — provider registrado (saída do 501)**: ping `notifications/send {type:offer,
+  offer_id:<fake>}` → antes `501 whatsapp_provider_not_configured`, depois `422 not_found`
+  (passou o check do provider em `sendNotification` linhas 200-202 → prova 501 sumiu sem enviar).
+- **Estágio 2a — backend → Evolution → WhatsApp (direto)**: `notifications/send {type:terminal,
+  delivery_id:33333333}` c/ `pickup_contact_phone=5531997722783` (UPDATE fixture dev) →
+  `200 {ok:true, notification_provider:evolution}`; log `notification.terminal ok:true
+  provider:evolution`; DB `notifications status:sent provider:evolution
+  recipient_phone=5531997722783 external_id=3EB0C773C216F8CE544601` (ID real Baileys/WhatsApp).
+  Insight: `type:terminal`/`status_update` resolvem destinatário do próprio `delivery_requests`
+  (`pickup_contact_phone`) **sem guard de estado e sem driver/assignment** — scaffolding mínimo
+  p/ validar provider.
+- **Estágio 2b — cadeia n8n completa → Evolution → WhatsApp**: `INSERT delivery_events(
+  event_type:driver_to_pickup, delivery_request_id:33333333)` → trigger
+  `trg_delivery_events_notify_n8n` → pg_net → dispatcher → `#11-update` (Code Build items:
+  1 item status_update) → `notifications/send {type:status_update}` → backend → Evolution →
+  WhatsApp. Nova row DB `event_type=status_update status=sent
+  external_id=3EB0B5E3A4111F0A7A56BC` (ID NOVO, distinto do 2a) em **~5s** de latência
+  end-to-end; log `notification.status_update ok:true provider:evolution`. Essa row só pode
+  existir se o n8n chamou o backend → prova cadeia n8n→Evolution p/ envio real.
+- **Ambos confirmados pelo usuário** (mensagens chegaram no celular `+5531997722783`):
+  `ViO10 — Corrida 33333333 falhou.` (2a) e `ViO10 — Atualização da corrida 33333333: falhou.`
+  (2b). Regra mestra íntegra: não simular PASS.
+- **Fix provider**: `evolution-provider.ts:28` agora `encodeURIComponent(config.instanceName)`
+  — nomes c/ espaço/hífen quebravam o path `/message/sendText/{instance}` (404). Bug inicial
+  era nome errado ("jady gomes" não existia); corrigido p/ slug real "Olivia - NEA" + encoding
+  defensivo. 404 ≠ 400/422 → não tenta próximo shape; falha direto.
+- **Regressão**: vitest 175/175 (16 suítes) — sem regressão após o fix.
+- **Ressalva**: DataCrazy in-conversation (janela 24h, só c/ conversa real iniciada pelo
+  usuário — não sintetizável) + OTP real ao recebedor (`type:otp`, precisa delivery em
+  `in_transit` — bloqueado por geo 501 no fluxo normal, só via fixture SQL direta) não validados
+  live. Evolution cobre todo cold (crítico). `service_role` nunca no n8n (3 fronteiras auth);
+  OTP plaintext nunca transita n8n (ADR-022 D5).
+
 ## [Sessão 15] — 2026-08-29 — Endpoints driver/user-facing, signed links, webhook router, cookie/middleware full (ADR-020)
 
 > Camada de aplicação **pura** — sem migration/RPC/enum/grant novo. Os 4 RPCs driver-facing

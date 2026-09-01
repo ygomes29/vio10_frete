@@ -25,7 +25,9 @@ export function createEvolutionProvider(config: EvolutionConfig): WhatsAppProvid
   return {
     async send(input: WhatsAppSendInput): Promise<WhatsAppSendResult> {
       const base = config.apiUrl.replace(/\/+$/, "");
-      const url = `${base}/message/sendText/${config.instanceName}`;
+      // encodeURIComponent: nomes de instância podem ter espaços/hífens (ex. "Olivia - NEA");
+      // path component cru com espaço é inválido/ambíguo. Defesa em profundidade.
+      const url = `${base}/message/sendText/${encodeURIComponent(config.instanceName)}`;
       const headers = {
         apikey: config.apiKey,
         "Content-Type": "application/json",

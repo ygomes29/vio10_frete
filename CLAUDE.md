@@ -329,11 +329,11 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   implementação reabre com Route Handlers + WhatsApp.
 - **Próxima**: Sessão 16 Phase 3 (restante) — sub-workflow #8-close (Wait/SWAC,
   `/dispatch/rounds/{id}/close`) + #9-nova-rodada encadeado (**bloqueado por geo 501** —
-  `create_quote` precisa routing provider, Sessão 20) + envio WhatsApp real (credenciais
-  Evolution/DataCrazy, D1 ADR-021 — hoje 501) + Phase 4 (docs/ADRs finais + regressão DB
-  10/10 suítes). **Phase 3 sub-workflows #6/#10/#11/#12/#13/#14 + reconciler + reachability
-  já provados live** (deploy Vercel público). Trigger DB `trg_delivery_events_notify_n8n` +
-  dispatcher + 7 sub-workflows ativos no dev.
+  `create_quote` precisa routing provider, Sessão 20) + **envio WhatsApp real PROVEN live
+  (Evolution cold, Estágios 1+2a+2b — restam DataCrazy in-conversation + OTP real ao recebedor)**
+  + Phase 4 (docs/ADRs finais + regressão DB 10/10 suítes). **Phase 3 sub-workflows
+  #6/#10/#11/#12/#13/#14 + reconciler + reachability já provados live** (deploy Vercel público).
+  Trigger DB `trg_delivery_events_notify_n8n` + dispatcher + 7 sub-workflows ativos no dev.
 - **Sessão 16 (em andamento — Phase 1 + design + Phase 2 trigger model live + Phase 3
   sub-workflows provados live)**: WhatsApp outbound híbrido + n8n trigger model/contrato/live + sub-workflows provisionados. **Phase 1 (backend outbound) — PASS**: ADR-021
   (D1 provider híbrido DataCrazy+Evolution V2 [Bearer p/ conversa aberta, apikey+fallback
@@ -407,8 +407,14 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   URL em modo expressão `={{ '...'+$json.body.delivery_request_id+'/...' }}`. Lições gravadas
   em `memory/n8n-live-infra.md` (#8-#11). `service_role` nunca no n8n (3 fronteiras auth);
   OTP plaintext nunca transita n8n (D5). **Ressalva (regra mestra)**: #8-close + #9-nova-rodada
-  (bloqueado por geo 501 — `create_quote` precisa routing provider Sessão 20) + envio WhatsApp
-  real (credenciais Evolution/DataCrazy, ADR-021 D1 — hoje 501) + Phase 4 (docs/ADRs finais
+  (bloqueado por geo 501 — `create_quote` precisa routing provider Sessão 20) + **envio WhatsApp
+  real PROVEN live (Evolution cold — Estágio 1 provider registrado/saída do 501, Estágio 2a
+  backend→Evolution→WhatsApp direto `external_id=3EB0C773...`, Estágio 2b cadeia n8n completa
+  `external_id=3EB0B5E3...` ~5s latência; ambos confirmados pelo usuário no celular
+  `+5531997722783`; fix `encodeURIComponent` no `evolution-provider.ts:28`, instância
+  `Olivia - NEA`)** — restam DataCrazy in-conversation (janela 24h, só c/ conversa real
+  iniciada pelo usuário — não sintetizável) + OTP real ao recebedor (`type:otp`, precisa delivery
+  em `in_transit` — bloqueado por geo 501 no fluxo normal) + Phase 4 (docs/ADRs finais
   + regressão DB 10/10 suítes — vitest 175/175 reconfirmado sem regressão). Geo 501 (Sessão
   20). Storage RLS, UI, rate limiting/mTLS → Sessões 17-19/22/26.
 - **Sessão 15 (concluída)**: Endpoints driver/user-facing, signed links, webhook router,

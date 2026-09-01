@@ -17,8 +17,13 @@
 > whatsapp, #10-assign→501, #11-update→501 (+branch `in_transit`→otp), #12-notify→501,
 > #13-confirm→422 pod_required, #14-failure→not_found, #15-reconciler→200 scan). 3 bugs
 > reais do n8n httpRequest v4.2 achados+corrigidos (objeto aninhado, delimitador `{{ }}`,
-> URL `{{ }}` inline não resolve). **Restante Phase 3**: #8-close + #9-nova-rodada
-> (bloqueado por geo 501 — Sessão 20) + envio WhatsApp real (credenciais Evolution/DataCrazy).
+> URL `{{ }}` inline não resolve). **WhatsApp real PROVEN live** (Sessão 16 Phase 3b: Evolution
+> V2 cold — Estágio 1 saída do 501, Estágio 2a backend→Evolution→WhatsApp direto
+> `external_id=3EB0C773...`, Estágio 2b cadeia n8n completa `external_id=3EB0B5E3...` ~5s
+> latência; ambos confirmados pelo usuário no celular; fix `encodeURIComponent` no
+> `evolution-provider.ts:28`, instância `Olivia - NEA`). **Restante Phase 3**: #8-close +
+> #9-nova-rodada (bloqueado por geo 501 — Sessão 20) + DataCrazy in-conversation (janela 24h,
+> só c/ conversa real) + OTP real ao recebedor (`type:otp`, precisa `in_transit` — geo 501).
 > Não simulado (regra mestra).
 
 ## Regra obrigatória
