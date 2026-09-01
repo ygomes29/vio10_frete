@@ -34,12 +34,18 @@ export function DeliveryMap({
   deliveryId,
   pickup,
   delivery,
+  positionsUrl,
 }: {
   deliveryId: string;
   pickup: Point;
   delivery: Point;
+  /** URL de polling das posições (default `/api/admin/deliveries/{id}/positions`).
+   *  Sessão 19: parametrizado p/ reuso no portal business (`/api/business/deliveries/
+   *  {id}/positions`). */
+  positionsUrl?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const positionsEndpoint = positionsUrl ?? `/api/admin/deliveries/${deliveryId}/positions`;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -100,7 +106,7 @@ export function DeliveryMap({
 
       async function refresh() {
         if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-        const r = await apiGet<PositionsData>(`/api/admin/deliveries/${deliveryId}/positions`);
+        const r = await apiGet<PositionsData>(positionsEndpoint);
         if (!r.ok || !r.data || !map) return;
         const d = r.data.driver;
         if (d?.position) {
@@ -131,7 +137,7 @@ export function DeliveryMap({
       if (map) map.remove();
       map = null;
     };
-  }, [deliveryId, pickup.lat, pickup.lng, delivery.lat, delivery.lng]);
+  }, [deliveryId, pickup.lat, pickup.lng, delivery.lat, delivery.lng, positionsEndpoint]);
 
   return <div ref={containerRef} className="h-[420px] w-full rounded-md border" role="img" aria-label="Mapa da corrida" />;
 }

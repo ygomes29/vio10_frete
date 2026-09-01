@@ -25,7 +25,15 @@ const OPTIONS = [
   { value: "expired", label: "Expirada" },
 ];
 
-export function StatusFilter({ current }: { current: string | null }) {
+export function StatusFilter({
+  current,
+  basePath = "/admin/deliveries",
+}: {
+  current: string | null;
+  /** Base da URL da lista (default `/admin/deliveries`). Sessão 19: parametrizado p/
+   *  reuso no portal business (`/business/deliveries`). */
+  basePath?: string;
+}) {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -35,7 +43,7 @@ export function StatusFilter({ current }: { current: string | null }) {
     else params.delete("status");
     params.delete("offset");
     const qs = params.toString();
-    router.push(qs ? `/admin/deliveries?${qs}` : "/admin/deliveries");
+    router.push(qs ? `${basePath}?${qs}` : basePath);
   }
 
   return (

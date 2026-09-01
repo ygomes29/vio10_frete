@@ -5,7 +5,10 @@
 - **Sessão 01**: diagnóstico — **aprovado com ajustes**.
 - **Sessão 02**: documentação-mãe + ADRs — **concluída**.
 - **Sessão 03**: fundação do banco — **concluída (Gate B implementado)**.
-- **Sessão 03.5 (atual)**: validação real da fundação — **concluída — PASS**.
+- **Sessão 03.5**: validação real da fundação — **concluída — PASS**.
+- **Sessão 19 (atual)**: Portal business (read-side via RLS, helper `my_org_memberships`,
+  read-only MVP) — **concluída — PASS** (ADR-025). 31 migrations, 261/261 vitest, regressão
+  DB 10/10 suítes + replay 0001→0031 limpo, redirect `/business` destravado.
   - 14 migrations em `supabase/migrations/` (extensões, enums, helpers, identidade/tenancy,
     drivers, service_areas, delivery core, pricing, dispatch/bids, assignments/events,
     integrações/notificações/POD, RLS default deny, RPCs, grants hardening).
@@ -400,14 +403,29 @@
   live**: grant gap → 0030; hint FK composta `bids!bids_offer_driver_fk`; EWKB parse.
   - **Ressalvas (declarado, não PASS)**: dispatch chain completo (geo 501 Sessão 20) —
     fixture SQL; renderização visual Leaflet no browser (exige JS) → usuário; **GAP LATENTE
-    business** (`organization_memberships` sem SELECT grant → redirect business null →
-    helper análogo Sessão 19); ações de gestão + telas Entregadores/Empresas → futura.
+    business** (FECHADO Sessão 19); ações de gestão + telas Entregadores/Empresas → futura.
   - **Veredito**: GO para Sessão 19 (Portal business — destrava redirect business) ou
     Sessão 20 (geo provider — destrava dispatch chain e valida o PWA end-to-end sem fixture).
-- **Próxima**: Sessão 19 (Portal business) ou Sessão 20 (geo Google Maps — `/quote`+
-    `/enrich` do 501, dispatch chain completo, validação live do PWA sem fixture). Sessão 16
-    restante (#8-close/#9-nova-rodada bloqueado por geo 501; DataCrazy in-conversation; OTP
-    real ao recebedor).
+- **Sessão 19 (concluída)**: Portal business (read-side via RLS, helper `my_org_memberships`,
+  read-only MVP) — **PASS** (ADR-025). **Read-only MVP**: overview (KPIs corridas/custo do
+  tenant, **sem** KPI entregadores) + lista + detalhe (timeline + mapa c/ posição live
+  polling 15s). Read via client user-scoped + RLS `can_view_delivery_request`/`my_org_ids()`,
+  **sem `service_role`**. `handleBusinessGet` (403 defense-in-depth). **Migration 0031**
+  (`my_org_memberships()` SECURITY DEFINER set-returning — espelho 0030/0019; fecha grant gap
+  `organization_memberships`, destrava redirect `/business`). Reuso máximo: query fns
+  `admin-reads.ts` re-exportadas + UI admin via props parametrizadas (`detailHref`/`basePath`/
+  `positionsUrl`, defaults admin backward compatible). `tsc` clean; `next build` limpo;
+  **261/261** vitest; regressão DB reset+replay **0001→0031 (31/31)** + 10/10 suítes (zero
+  regressão); trigger n8n restaurado pós-reset.
+  - **Ressalvas (declarado, não PASS)**: dispatch chain completo (geo 501 Sessão 20) —
+    fixture SQL; renderização visual Leaflet → usuário; gestão (criar corrida, unidades,
+    entregadores) → sessão futura.
+  - **Veredito**: GO para Sessão 20 (geo provider — destrava dispatch chain e valida o
+    PWA/admin/business end-to-end sem fixture) ou Sessão 19-bis (ações de gestão business).
+- **Próxima**: Sessão 20 (geo Google Maps — `/quote`+`/enrich` do 501, dispatch chain
+    completo, validação live do PWA/admin/business sem fixture) ou Sessão 19-bis (gestão
+    business). Sessão 16 restante (#8-close/#9-nova-rodada bloqueado por geo 501; DataCrazy
+    in-conversation; OTP real ao recebedor).
 
 ## Roadmap (20 fases / 29 sessões)
 

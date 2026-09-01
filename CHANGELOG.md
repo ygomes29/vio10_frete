@@ -2,6 +2,55 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 19] — 2026-09-01 — Portal business (read-side via RLS, helper `my_org_memberships`, read-only MVP) — ADR-025
+
+> Primeira superfície business do ViO10 + fecha o **GAP LATENTE** business da Sessão 18
+> (`organization_memberships` sem SELECT grant a `authenticated` → redirect business null
+> → `no_role`). **Read-only MVP** (decisão do usuário): overview de corridas/custo do
+> tenant + lista + detalhe (timeline + mapa c/ posição live). Gestão → sessão futura.
+
+### Entrega
+- **Fase 1 — DB**: migration **0031** `my_org_memberships()` SECURITY DEFINER set-returning
+  (espelho `my_platform_role()` 0030 / `my_email()` 0019) — lê próprias rows
+  `user_id = auth.uid()`, `grant execute to authenticated, service_role`. **Sem tabela/
+  coluna/enum novo.** Fecha grant gap; destrava redirect `/business`.
+- **Fase 2 — Landing + context + handler**: `resolveOrgMemberships` (`lib/auth/landing.ts`)
+  + ramo business `resolveLandingPath` via RPC (de `select` direto → `.rpc("my_org_memberships")`).
+  `getBusinessContext()` (`lib/server/business-context.ts`) → `{client, memberships}` ou null.
+  `handleBusinessGet` (`lib/api/business-handler.ts`) — cookie JWT → getUser (401) →
+  resolveOrgMemberships (403 `not_authorized` se vazio, defense-in-depth) → run. **Sem
+  `service_role`, sem ledger** (read-only).
+- **Fase 3 — Services + 5 endpoints**: `lib/services/business-reads.ts` — `getBusinessMe`
+  (memberships + organizations/businesses/business_locations via RLS) + `getBusinessOverview`
+  (72h, sem drivers KPI, volume em centavos inteiros, falhas recentes slice 20) + re-export
+  `listDeliveries`/`getDeliveryDetail`/`getDeliveryPositions`/`parsePointPosition` de
+  `admin-reads.ts` (RLS-agnostic). Endpoints `GET /api/business/{me,overview,deliveries,
+  deliveries/[id],deliveries/[id]/positions}` via `handleBusinessGet`.
+- **Fase 4 — UI portal business**: refactors admin compat (`DeliveriesTable.detailHref`/
+  `StatusFilter.basePath`/`DeliveryMap.positionsUrl`/`DeliveryDetailTabs.positionsUrl` —
+  defaults admin, backward compatible) + route group `(business)` `{layout,business,
+  business/deliveries,business/deliveries/[id]}` + `components/business/overview-kpis.tsx`
+  (polling 30s, visibilityState gate). Paleta branco+laranja `#fe7845`.
+- **Fase 5 — ADR-025 + docs + testes + validação**: ADR-025 (9 decisões); CLAUDE.md/PLAN.md/
+  FRONTEND.md/CHANGELOG.md; vitest `lib/{api/business-handler,services/business-reads,
+  auth/landing}.test.ts`.
+
+### Hardening
+- `tsc --noEmit` clean; `next build` limpo (5 `/api/business/*` + 3 `/business/*`).
+- **261/261** vitest (22 suítes, +26 novos).
+- Regressão DB `verify_sessao16.sh`: reset+replay **0001→0031 (31/31)** + inventário 28
+  tabelas/28 RLS/`anon`=0 + **10/10 suítes PASS** (418 asserções, zero regressão); trigger
+  n8n `trg_delivery_events_notify_n8n` restaurado pós-reset.
+
+### Validação live (dev, real — não simulada)
+- 401 sem cookie; 403 cookie de driver; business cookie → 200 `/me`/`/overview`/`/deliveries`/
+  `/deliveries/{id}`/`/positions`; login → redirect `/business`; SSR 3 páginas 200.
+
+### Ressalvas (regra mestra — não simulado PASS)
+- Dispatch chain completo não validado live (geo 501 Sessão 20) — fixture SQL.
+- Renderização visual Leaflet no browser → usuário.
+- Gestão (criar corrida, unidades, entregadores) → sessão futura.
+
 ## [Sessão 18] — 2026-09-01 — Dashboard admin (read-side via RLS, Leaflet+OSM, polling, read-only MVP) — ADR-024
 
 > Primeira superfície admin do ViO10. **Read-only MVP** (decisão do usuário): overview

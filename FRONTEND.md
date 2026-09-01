@@ -87,9 +87,11 @@ coleta/destino/entregador.
 
 - **Login + redirect por role** (`resolveLandingPath` em `lib/auth/landing.ts`):
   platform role (super_admin/admin/operator) → `/admin`; driver → `/driver`;
-  business → `/business` (latente — ver ADR-024 D6-exceção); nenhum → recusa.
-  Role resolvida via RPC SECURITY DEFINER `my_platform_role()` (migration 0030) —
-  `user_platform_roles` sem SELECT grant a `authenticated`.
+  business → `/business` (RESOLVIDO Sessão 19 — ver ADR-025 D3); nenhum → recusa.
+  Platform role via RPC SECURITY DEFINER `my_platform_role()` (migration 0030) —
+  `user_platform_roles` sem SELECT grant a `authenticated`. Membership business via RPC
+  SECURITY DEFINER `my_org_memberships()` (migration 0031) — `organization_memberships`
+  sem SELECT grant a `authenticated` (mesmo padrão 0030/0019).
 - **PWA Entregador** (Sessão 17): `app/(driver)/...`, polling 10s foreground,
   login Server Action, manifest+SW, read-side sem RPC (RLS `can_view_delivery_request`/
   `my_driver_id()`), `POST /api/driver/location` (WKT PostgREST).
@@ -102,13 +104,27 @@ coleta/destino/entregador.
   `driver_locations.position` geography parseado de **EWKB hex** em TS — sem migration
   p/ lat/lng). Paleta de marca: **branco + laranja `#fe7845`** (D0). Telas de
   Entregadores/Empresas e ações de gestão → sessão futura.
+- **Portal business** (Sessão 19, **read-only MVP** — ADR-025): `app/(business)/{business,
+  business/deliveries, business/deliveries/[id]}` + `app/api/business/{me,overview,
+  deliveries,deliveries/[id],deliveries/[id]/positions}`. Read via client **user-scoped** +
+  RLS `can_view_delivery_request`/`my_org_ids()` (escopa ao tenant), **sem `service_role`**.
+  `handleBusinessGet` (defense-in-depth: 403 `not_authorized` se sem membership).
+  **Overview** = KPIs de corridas/custo do tenant (ativas, terminais, entregues hoje +
+  volume em centavos inteiros, falhas recentes) — **sem** KPI de entregadores (D8).
+  **Detalhe** = timeline + resumo + itens + cotação (customer price) + mapa Leaflet c/
+  posição live do entregador (polling 15s). Reuso máximo: query fns `admin-reads.ts`
+  re-exportadas + UI admin via props parametrizadas (`detailHref`/`basePath`/`positionsUrl`,
+  defaults admin backward compatible). Paleta branco+laranja `#fe7845`. Gestão (criar
+  corrida, unidades, entregadores) → sessão futura.
 
 ## 5. Portal da empresa
 
 Solicitar corrida, obter cotação, confirmar, acompanhar, histórico, repetir
 entrega, comprovante, cobranças, gerenciar usuários/unidades. WhatsApp continua
 canal válido; o portal **não** é obrigatório para usar o ViO10. Isolamento total
-entre empresas.
+entre empresas. **Realização (Sessão 19 / ADR-025)**: read-only MVP entregue — ver §4
+acima (overview + lista + detalhe). Ações de gestão (criar corrida, unidades,
+entregadores) → sessão futura.
 
 ## 6. Convenções
 

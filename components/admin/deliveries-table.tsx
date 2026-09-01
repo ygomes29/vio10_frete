@@ -40,7 +40,16 @@ function fmtDate(s: string | null): string {
   return new Date(s).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
 }
 
-export function DeliveriesTable({ rows }: { rows: DeliveryRow[] }) {
+export function DeliveriesTable({
+  rows,
+  detailHref,
+}: {
+  rows: DeliveryRow[];
+  /** Builder do link de detalhe por id (default `/admin/deliveries/{id}`). Sessão 19:
+   *  parametrizado p/ reuso no portal business (`/business/deliveries/{id}`). */
+  detailHref?: (id: string) => string;
+}) {
+  const hrefFor = detailHref ?? ((id: string) => `/admin/deliveries/${id}`);
   if (rows.length === 0) {
     return <p className="py-8 text-center text-sm text-muted-foreground">Nenhuma corrida encontrada.</p>;
   }
@@ -65,7 +74,7 @@ export function DeliveriesTable({ rows }: { rows: DeliveryRow[] }) {
           return (
             <TableRow key={r.id}>
               <TableCell>
-                <Link href={`/admin/deliveries/${r.id}`} className="inline-flex flex-col gap-1">
+                <Link href={hrefFor(r.id)} className="inline-flex flex-col gap-1">
                   <Badge variant={b.variant}>{b.label}</Badge>
                   <span className="font-mono text-[10px] text-muted-foreground">{r.id.slice(0, 8)}</span>
                 </Link>

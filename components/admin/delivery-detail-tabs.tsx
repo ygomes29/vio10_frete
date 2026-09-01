@@ -112,7 +112,15 @@ function fmt(s: string | null | undefined): string {
   return new Date(s).toLocaleString("pt-BR");
 }
 
-export function DeliveryDetailTabs({ delivery }: { delivery: DeliveryDetail }) {
+export function DeliveryDetailTabs({
+  delivery,
+  positionsUrl,
+}: {
+  delivery: DeliveryDetail;
+  /** URL de polling das posições p/ o mapa (default `/api/admin/deliveries/{id}/positions`).
+   *  Sessão 19: parametrizado p/ reuso no portal business. */
+  positionsUrl?: string;
+}) {
   const b = statusBadge(delivery.status);
   const quote = asArray(delivery.delivery_quotes)[0];
   const items = delivery.delivery_items ?? [];
@@ -223,6 +231,7 @@ export function DeliveryDetailTabs({ delivery }: { delivery: DeliveryDetail }) {
             deliveryId={delivery.id}
             pickup={{ lat: delivery.pickup_latitude, lng: delivery.pickup_longitude }}
             delivery={{ lat: delivery.delivery_latitude, lng: delivery.delivery_longitude }}
+            positionsUrl={positionsUrl}
           />
         </Card>
       </TabsContent>
