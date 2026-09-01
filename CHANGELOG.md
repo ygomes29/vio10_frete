@@ -2,6 +2,72 @@
 
 Formato: sessão + data + escopo.
 
+## [Sessão 18] — 2026-09-01 — Dashboard admin (read-side via RLS, Leaflet+OSM, polling, read-only MVP) — ADR-024
+
+> Primeira superfície admin do ViO10. **Read-only MVP** (decisão do usuário): overview
+> operacional + lista + detalhe de corrida. Telas de Entregadores/Empresas e ações de
+> gestão → sessão futura. Paleta de marca: **branco + laranja `#fe7845`** (D0).
+
+### Entrega
+- **Fase 1 — Infra admin**: `resolvePlatformRole` extraído de `resolveLandingPath`
+  (`lib/auth/landing.ts`) p/ reuso (login + admin handler/context). `getAdminContext()`
+  (`lib/server/admin-context.ts`) → `{client, role}` ou null. `handleAdminGet`
+  (`lib/api/admin-handler.ts`) — espelho de `handleUserGet` c/ checagem de platform role
+  → **403 `not_authorized`** (defense-in-depth: middleware só checa sessão, não role).
+  Primitivas UI hand-rolled `components/ui/{table,select,tabs}.tsx`. `app/(admin)/layout.tsx`
+  (header laranja + nav + LogoutButton, `max-w-7xl`, sem PWARegister).
+- **Fase 2 — Read-side + endpoints**: `lib/services/admin-reads.ts` — `getOverview`
+  (counts por status ativos+terminais 72h, drivers por disponibilidade, volume do dia em
+  centavos, falhas), `listDeliveries` (paginado fetch limit+1, filtros, clamp [1,100]),
+  `getDeliveryDetail` (árvore aninhada completa), `getDeliveryPositions` + `parsePointPosition`
+  (**EWKB hex** + GeoJSON + WKT). 4 endpoints `GET /api/admin/{overview,deliveries,
+  deliveries/[id],deliveries/[id]/positions}` (user-scoped, admin-gated, `cache: no-store`).
+- **Fase 3 — UI**: `app/(admin)/{admin,admin/deliveries,admin/deliveries/[id]}` (Server
+  Components, `getAdminContext`+`admin-reads`) → `<OverviewKpis/>` (polling 30s),
+  `<DeliveriesTable/>`+`<StatusFilter/>`+`<Pagination/>`, `<DeliveryDetailTabs/>` (Resumo/
+  Timeline/Mapa/Offers). `<DeliveryMap/>` vanilla `leaflet@1.9.4` (OSM, sem credencial;
+  divIcon SVG; polling /positions 15s). `lib/admin/status.ts` (statusBadge/
+  availabilityBadge/eventLabel — **24 tipos** conferidos live).
+- **Fase 4 — ADR-024 + docs + testes + validação live**: ADR-024 (D0-D8, D6-exceção).
+  FRONTEND §4, BACKEND §13, PLAN, CLAUDE atualizados.
+
+### Migração / schema
+- **0030 — `my_platform_role()` SECURITY DEFINER** (exceção D6 — ver abaixo). 1 função +
+  `grant execute to authenticated, service_role`. **Nenhuma tabela/coluna/enum novo.**
+
+### Bug real achado em validação live (e fix) — ADR-024 D6-exceção
+- **Grant gap `user_platform_roles`**: `resolvePlatformRole` lia a tabela via client
+  user-scoped, mas `authenticated` **não tem SELECT grant** (0015 — "backend resolve
+  server-side"); RLS `upr_sel` (0017) é moot sem grant → admin → null → 403 em `/api/admin/*`
+  + redirect `/driver` no login (mascarado desde Sessão 17 — só drivers testados live). Fix:
+  migration 0030 `my_platform_role()` SECURITY DEFINER (espelho de `my_email()`, sem abrir
+  SELECT ao `authenticated`) + `resolvePlatformRole` via `.rpc()`.
+- **Hint FK composta `bids`**: `bids!delivery_offer_id` não resolve FK **composta**
+  `bids_offer_driver_fk` (PGRST200) → `internal_error` no detalhe. Fix: `bids!bids_offer_driver_fk`.
+- **EWKB hex**: PostgREST/Supabase devolve `geography` como hex EWKB (não GeoJSON/WKT) →
+  `parsePointPosition` null (driver sem posição no mapa). Fix: branch EWKB no parser
+  (little/big-endian, com/sem SRID, guarda Point).
+
+### Verificação
+- `tsc --noEmit` clean; `next build` limpo (rotas admin presentes).
+- **235/235** vitest (19 suítes, +28: `admin-handler` 7, `admin-reads` 21 c/ EWKB).
+- Regressão DB `verify_sessao16.sh`: reset+replay **0001→0030 (30/30)** + inventário
+  íntegro (28 tabelas, 28 RLS, `anon`=0) + **10/10 suítes PASS** (418 asserções, zero
+  regressão). Trigger n8n `trg_delivery_events_notify_n8n` restaurado pós-reset.
+- **Live (dev, real — não simulado)**: 401 sem cookie; 307 `/admin` sem sessão; **403**
+  cookie de driver (defense-in-depth); admin cookie → 200 overview (KPIs coerentes),
+  deliveries?status=assigned, detail (b2222 5 eventos, a1111 quote, c3333 delivered),
+  positions (driver EWKB → {lng:-43.855,lat:-20.915}). SSR 3 páginas 200 sem crash.
+
+### Ressalva (regra mestra)
+- Dispatch chain completo não validado live (geo 501, Sessão 20) — fixture SQL injeta
+  corridas em vários estados. **Read-only**: nenhuma mutação admin.
+- Renderização visual Leaflet no browser (tiles OSM, markers/polyline) não verificada por
+  curl (exige JS) — API `/positions` + `leaflet@1.9.4`+CSS OK; validação visual → usuário.
+- **GAP LATENTE business**: `organization_memberships` sem SELECT grant a `authenticated`
+  → redirect business em `resolveLandingPath` retorna null → `no_role`. Fix (helper
+  análogo) → Sessão 19. Sem user business no MVP.
+
 ## [Sessão 17] — 2026-08-31 — PWA Entregador (read-side sem RPC, polling, login Server Action, manifest+SW) — ADR-023
 
 > Primeira UI do ViO10 + read-side do driver. **Sem migration/RPC/enum/grant novo**

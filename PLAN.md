@@ -388,10 +388,26 @@
     (Sessão 18) / portal business (Sessão 19).
   - **Veredito**: GO para Sessão 18 (Dashboard admin) ou Sessão 20 (geo provider — destrava
     dispatch chain e valida o PWA end-to-end sem fixture).
-- **Próxima**: Sessão 18 (Dashboard ViO10/admin) ou Sessão 20 (geo Google Maps — `/quote`+
+- **Sessão 18 (concluída)**: Dashboard admin (read-side via RLS, Leaflet+OSM, polling,
+  read-only MVP) — **PASS** (ADR-024). **Read-only MVP**: overview + lista + detalhe de
+  corrida. Read via client user-scoped + RLS `is_platform_admin()` cross-tenant, **sem
+  `service_role`**. `handleAdminGet` (403 defense-in-depth). **Migration 0030**
+  (`my_platform_role()` SECURITY DEFINER — exceção D6: `authenticated` sem SELECT grant em
+  `user_platform_roles`, RLS `upr_sel` moot). Mapa Leaflet+OSM vanilla sem credencial
+  (`driver_locations.position` parse EWKB hex). Polling 30s/15s. Paleta branco+laranja
+  `#fe7845`. `tsc` clean; `next build` limpo; **235/235** vitest; regressão DB reset+replay
+  **0001→0030 (30/30)** + 10/10 suítes (zero regressão). **3 bugs reais achados+corrigidos
+  live**: grant gap → 0030; hint FK composta `bids!bids_offer_driver_fk`; EWKB parse.
+  - **Ressalvas (declarado, não PASS)**: dispatch chain completo (geo 501 Sessão 20) —
+    fixture SQL; renderização visual Leaflet no browser (exige JS) → usuário; **GAP LATENTE
+    business** (`organization_memberships` sem SELECT grant → redirect business null →
+    helper análogo Sessão 19); ações de gestão + telas Entregadores/Empresas → futura.
+  - **Veredito**: GO para Sessão 19 (Portal business — destrava redirect business) ou
+    Sessão 20 (geo provider — destrava dispatch chain e valida o PWA end-to-end sem fixture).
+- **Próxima**: Sessão 19 (Portal business) ou Sessão 20 (geo Google Maps — `/quote`+
     `/enrich` do 501, dispatch chain completo, validação live do PWA sem fixture). Sessão 16
     restante (#8-close/#9-nova-rodada bloqueado por geo 501; DataCrazy in-conversation; OTP
-    real ao recebedor). Sessão 19 (portal business).
+    real ao recebedor).
 
 ## Roadmap (20 fases / 29 sessões)
 

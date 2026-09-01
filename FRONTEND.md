@@ -83,6 +83,26 @@ empresas, volume, valores, falhas. Tela de detalhe da corrida com **timeline de
 correspondente — **nada de editar status arbitrariamente**. Mapa operacional com
 coleta/destino/entregador.
 
+### Realização (Sessão 17 / ADR-023 + Sessão 18 / ADR-024)
+
+- **Login + redirect por role** (`resolveLandingPath` em `lib/auth/landing.ts`):
+  platform role (super_admin/admin/operator) → `/admin`; driver → `/driver`;
+  business → `/business` (latente — ver ADR-024 D6-exceção); nenhum → recusa.
+  Role resolvida via RPC SECURITY DEFINER `my_platform_role()` (migration 0030) —
+  `user_platform_roles` sem SELECT grant a `authenticated`.
+- **PWA Entregador** (Sessão 17): `app/(driver)/...`, polling 10s foreground,
+  login Server Action, manifest+SW, read-side sem RPC (RLS `can_view_delivery_request`/
+  `my_driver_id()`), `POST /api/driver/location` (WKT PostgREST).
+- **Dashboard admin** (Sessão 18, **read-only MVP**): `app/(admin)/{admin,
+  admin/deliveries, admin/deliveries/[id]}` + `app/api/admin/{overview,deliveries,
+  deliveries/[id],deliveries/[id]/positions}`. Read via client **user-scoped** + RLS
+  `is_platform_admin()` (cross-tenant), **sem `service_role`**. `handleAdminGet`
+  (defense-in-depth: 403 `not_authorized` se não platform role). **Polling** 30s
+  (overview) / 15s (mapa). **Mapa Leaflet+OSM** (vanilla `leaflet@1.9.4`, sem credencial;
+  `driver_locations.position` geography parseado de **EWKB hex** em TS — sem migration
+  p/ lat/lng). Paleta de marca: **branco + laranja `#fe7845`** (D0). Telas de
+  Entregadores/Empresas e ações de gestão → sessão futura.
+
 ## 5. Portal da empresa
 
 Solicitar corrida, obter cotação, confirmar, acompanhar, histórico, repetir

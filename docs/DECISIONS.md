@@ -29,6 +29,12 @@ Aprovadas na Sessão 02 (2026-08-27).
 | ADR-016 | Ciclo completo pós-`assigned` + POD gate (matriz ator×transição, two-phase POD) | Aprovado (Sessão 11) |
 | ADR-017 | POD completo (OTP do recebedor, gate de geo, gate de pickup POD, Storage) | Aprovado (Sessão 12) |
 | ADR-018 | Arquitetura dos workflows n8n (design dos 16 workflows, trigger model, timeout) | Aprovado (Sessão 13) |
+| ADR-019 | Camada de API — Next.js Route Handlers (contract surface, 2 scopes, shared secret, idempotency ledger, provider 501) | Aprovado (Sessão 14) |
+| ADR-020 | Endpoints driver/user-facing, signed links HMAC, webhook router DataCrazy, cookie/middleware full | Aprovado (Sessão 15) |
+| ADR-021 | WhatsApp outbound híbrido (DataCrazy+Evolution V2) + backend envia+loga via `notifications/send` | Aprovado (Sessão 16) |
+| ADR-022 | n8n trigger model — Database Webhooks `pg_net`+`supabase_functions` sobre `delivery_events` (supersede ADR-018 D2) | Aprovado (Sessão 16) |
+| ADR-023 | PWA Entregador — read-side sem RPC (RLS), polling, login Server Action, manifest+SW | Aprovado (Sessão 17) |
+| ADR-024 | Dashboard admin (read-side via RLS, Leaflet+OSM, polling, read-only MVP) | Aprovado (Sessão 18) |
 
 ## Decisões adicionais registradas (sem ADR próprio, mas vinculadas)
 

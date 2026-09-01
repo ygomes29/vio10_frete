@@ -110,7 +110,7 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
 | `docs/SECURITY.md` | RLS, authz, idempotência, auth/convite, links assinados, secrets |
 | `docs/GEOLOCATION.md` | Abstração de provider, Google Maps, TWO_WHEELER |
 | `docs/DECISIONS.md` | Log consolidado de decisões |
-| `docs/adr/` | ADRs ADR-001 em diante (até ADR-022) |
+| `docs/adr/` | ADRs ADR-001 em diante (até ADR-024) |
 
 ## Estado atual
 
@@ -327,11 +327,12 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   links) + webhook router DataCrazy + cookie/refresh/middleware full → **Sessão 15**
   (declarado, não PASS). Provider Google Maps real → **Sessão 20** (501 hoje). n8n
   implementação reabre com Route Handlers + WhatsApp.
-- **Próxima**: Sessão 18 (Dashboard admin) ou Sessão 20 (geo provider Google Maps —
-  destrava `/quote`+`/enrich` do 501 e o dispatch chain completo, validando live o PWA
-  end-to-end sem fixture). Sessão 16 restante: #8-close + #9-nova-rodada (bloqueado por
-  geo 501) + DataCrazy in-conversation + OTP real ao recebedor. Sessão 19 (portal business).
-  **Sessão 17 (PWA Entregador) concluída** — ver abaixo.
+- **Próxima**: Sessão 19 (Portal business — destrava redirect business; `organization_
+  memberships` tem o mesmo grant gap latente que `user_platform_roles` — helper análogo a
+  `my_platform_role()`) ou Sessão 20 (geo provider Google Maps — destrava `/quote`+`/enrich`
+  do 501 e o dispatch chain completo, validando live o PWA end-to-end sem fixture). Sessão
+  16 restante: #8-close + #9-nova-rodada (bloqueado por geo 501) + DataCrazy in-conversation
+  + OTP real ao recebedor. **Sessão 18 (Dashboard admin) concluída** — ver abaixo.
 - **Sessão 16 (em andamento — Phase 1 + design + Phase 2 trigger model live + Phase 3
   sub-workflows provados live)**: WhatsApp outbound híbrido + n8n trigger model/contrato/live + sub-workflows provisionados. **Phase 1 (backend outbound) — PASS**: ADR-021
   (D1 provider híbrido DataCrazy+Evolution V2 [Bearer p/ conversa aberta, apikey+fallback
@@ -500,6 +501,45 @@ via `dispatch_rounds` / `delivery_offers` / `bids`.
   **Ressalva (regra mestra — não simulado PASS)**: dispatch chain completo não validado
   live (geo 501 Sessão 20) — UI via fixture SQL (D9); POD foto/Storage RLS → Sessão 19/22;
   Realtime → futura (polling MVP); UI admin (Sessão 18) / portal business (Sessão 19).
+- **Sessão 18 (concluída)**: Dashboard admin (read-side via RLS, Leaflet+OSM, polling,
+  read-only MVP) — **PASS**. **ADR-024** (D0 paleta branco+laranja `#fe7845`; D1 read via
+  user-scoped + RLS `is_platform_admin()` cross-tenant, **sem `service_role`**; D2
+  read-only MVP; D3 Leaflet+OSM vanilla `leaflet@1.9.4` sem credencial, `driver_locations.
+  position` geography parseado de **EWKB hex** em TS; D4 polling 30s/15s foreground; D5
+  `getAdminContext()`+`handleAdminGet` defense-in-depth 403 `not_authorized`; D6 sem
+  migration **+ exceção 0030**; D7 frontend só apresenta; D8 operator vê mas não muta).
+  Entrega: `resolvePlatformRole` extraído de `resolveLandingPath` (reuso login+admin) +
+  `getAdminContext()` + `handleAdminGet` + primitivas `components/ui/{table,select,tabs}`
+  + `app/(admin)/layout.tsx` (Fase 1); `lib/services/admin-reads.ts` (`getOverview`/
+  `listDeliveries`/`getDeliveryDetail`/`getDeliveryPositions`+`parsePointPosition` EWKB)
+  + 4 endpoints `GET /api/admin/{overview,deliveries,deliveries/[id],deliveries/[id]/
+  positions}` (Fase 2); UI `app/(admin)/{admin,admin/deliveries,admin/deliveries/[id]}`
+  + `components/admin/{overview-kpis,deliveries-table,status-filter,delivery-timeline,
+  delivery-map,delivery-detail-tabs}` + `lib/admin/status.ts` (24 tipos) (Fase 3); ADR-024
+  + docs + testes + validação live (Fase 4). `service_role` nunca vaza ao browser admin
+  (user-scoped, cookie JWT). Hardening: `tsc` clean; `next build` limpo; **235/235** vitest
+  (19 suítes, +28); regressão DB `verify_sessao16.sh` reset+replay **0001→0030 (30/30)** +
+  inventário 28 tabelas/28 RLS/`anon`=0 + **10/10 suítes PASS** (418 asserções, zero
+  regressão); trigger n8n `trg_delivery_events_notify_n8n` restaurado pós-reset. **3 bugs
+  reais achados+corrigidos+provados live** (mock unitário não pegou): (1) **grant gap
+  `user_platform_roles`** — `authenticated` sem SELECT grant (0015; RLS `upr_sel` 0017
+  moot) → `resolvePlatformRole` null → 403 + redirect `/driver` (mascarado desde Sessão
+  17, só drivers testados) → fix **migration 0030 `my_platform_role()` SECURITY DEFINER**
+  (espelho `my_email()`, sem abrir SELECT ao `authenticated`) + `resolvePlatformRole` via
+  `.rpc()`; (2) **hint FK composta `bids`** — `bids!delivery_offer_id` não resolve FK
+  composta `bids_offer_driver_fk` (PGRST200) → `internal_error` no detalhe → fix
+  `bids!bids_offer_driver_fk`; (3) **EWKB hex** — PostgREST devolve geography como hex EWKB
+  (não GeoJSON/WKT) → `parsePointPosition` null → fix branch EWKB (little/big-endian, com/
+  sem SRID). **Validação live (dev, real)**: 401 sem cookie; 307 `/admin` sem sessão; 403
+  cookie de driver; admin cookie → 200 overview (KPIs coerentes), deliveries?status=
+  assigned, detail (b2222 5 eventos, a1111 quote, c3333 delivered), positions (driver EWKB
+  → {lng,lat}); SSR 3 páginas 200 sem crash. **Ressalva (regra mestra)**: dispatch chain
+  completo não validado live (geo 501 Sessão 20) — fixture SQL; renderização visual Leaflet
+  no browser (tiles/markers) não verificada por curl (exige JS) — API `/positions`+
+  `leaflet@1.9.4` OK, validação visual → usuário; **GAP LATENTE business** —
+  `organization_memberships` sem SELECT grant a `authenticated` → redirect business null
+  → `no_role` (helper análogo → Sessão 19); ações de gestão + telas Entregadores/Empresas
+  → sessão futura.
 
 Ver `PLAN.md` para o roadmap completo e `CHANGELOG.md` para o histórico.
 

@@ -14,19 +14,19 @@
   --card-foreground: oklch(0.21 0.02 265);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.21 0.02 265);
-  --primary: oklch(0.52 0.21 259);
-  --primary-foreground: oklch(0.98 0.01 247);
+  --primary: oklch(0.72 0.18 41); /* laranja marca #fe7845 */
+  --primary-foreground: oklch(0.18 0.03 41);
   --secondary: oklch(0.96 0.01 247);
   --secondary-foreground: oklch(0.28 0.03 265);
   --muted: oklch(0.96 0.01 247);
   --muted-foreground: oklch(0.52 0.02 265);
-  --accent: oklch(0.96 0.01 247);
-  --accent-foreground: oklch(0.28 0.03 265);
+  --accent: oklch(0.95 0.04 41); /* tint laranja */
+  --accent-foreground: oklch(0.32 0.07 41);
   --destructive: oklch(0.58 0.22 27);
   --destructive-foreground: oklch(0.98 0.01 247);
   --border: oklch(0.92 0.01 247);
   --input: oklch(0.92 0.01 247);
-  --ring: oklch(0.52 0.21 259);
+  --ring: oklch(0.72 0.18 41);
   --success: oklch(0.6 0.18 150);
   --success-foreground: oklch(0.98 0.01 150);
   --warning: oklch(0.72 0.17 70);
@@ -40,19 +40,19 @@
   --card-foreground: oklch(0.97 0.01 247);
   --popover: oklch(0.21 0.02 265);
   --popover-foreground: oklch(0.97 0.01 247);
-  --primary: oklch(0.62 0.2 259);
-  --primary-foreground: oklch(0.15 0.02 265);
+  --primary: oklch(0.74 0.17 41); /* laranja marca */
+  --primary-foreground: oklch(0.16 0.03 41);
   --secondary: oklch(0.27 0.03 265);
   --secondary-foreground: oklch(0.97 0.01 247);
   --muted: oklch(0.27 0.03 265);
   --muted-foreground: oklch(0.7 0.02 265);
-  --accent: oklch(0.27 0.03 265);
-  --accent-foreground: oklch(0.97 0.01 247);
+  --accent: oklch(0.3 0.06 41);
+  --accent-foreground: oklch(0.92 0.05 41);
   --destructive: oklch(0.62 0.22 27);
   --destructive-foreground: oklch(0.97 0.01 247);
   --border: oklch(0.3 0.02 265);
   --input: oklch(0.3 0.02 265);
-  --ring: oklch(0.62 0.2 259);
+  --ring: oklch(0.74 0.17 41);
   --success: oklch(0.62 0.18 150);
   --success-foreground: oklch(0.98 0.01 150);
   --warning: oklch(0.72 0.17 70);

@@ -743,3 +743,54 @@ posta em foreground durante corrida ativa (D8).
 +`validateDriverLocationBody`); `next build` limpo (todas as rotas). Regressão DB
 10/10 suítes (zero regressão — nada toca o DB). **Não simulado** (regra mestra).
 Dispatch chain completo (geo 501) e POD foto = **deferred** (Sessão 20 / 19-22).
+
+## 13. Read-side do admin (Sessão 18 — ADR-024)
+
+### 13.1 Read via user-scoped + RLS, sem service_role (D1)
+
+Dashboard admin **read-only MVP**: leitura direta via client **user-scoped** (cookie JWT,
+`auth.uid()`, RLS `is_platform_admin()` aplica cross-tenant — 0017). **Sem `service_role`**,
+sem RPC de read. `handleAdminGet` em `lib/api/admin-handler.ts`: `getUser`→401 →
+`resolvePlatformRole` (defense-in-depth: **403 `not_authorized`** se não platform role — o
+middleware só checa sessão, não role) → `run(correlationId, url, ctx={user,client,role})`
+→ `toApiResponse`. Sem idempotency ledger (read-only). `getAdminContext()` (Server
+Components sob `(admin)`) reusa o mesmo lookup → `{client, role}` ou null (redirect).
+
+### 13.2 `resolvePlatformRole` via RPC SECURITY DEFINER (D6-exceção, migration 0030)
+
+`resolvePlatformRole` (reuso por `resolveLandingPath` + `getAdminContext` + `handleAdminGet`)
+chama `client.rpc('my_platform_role')` — **não** lê `user_platform_roles` diretamente.
+Motivo (achado live): `authenticated` **não tem SELECT grant** na tabela (0015 — metadados
+de authz sensíveis; "backend resolve server-side"); a RLS `upr_sel` (0017) é moot sem grant
+(`permission denied for table user_platform_roles`). `my_platform_role()` (migration 0030)
+é `SECURITY DEFINER` (espelho de `my_email()` — lê a própria linha `user_id = auth.uid()`,
+devolve role text, **sem abrir SELECT da tabela ao `authenticated`**) + `grant execute to
+authenticated, service_role`. **GAP LATENTE (business → Sessão 19)**: `organization_memberships`
+tem o mesmo padrão; redirect business ainda lê a tabela diretamente — helper análogo na Sessão 19.
+
+### 13.3 Service `admin-reads.ts` + endpoints
+
+`lib/services/admin-reads.ts` (cada fn `RpcResult`-shaped, agregação client-side volume MVP):
+`getOverview` (counts por status ativos+terminais 72h, drivers por disponibilidade, volume
+do dia em centavos, falhas), `listDeliveries` (paginado fetch limit+1, filtros
+`status`/`business_id`, clamp [1,100]), `getDeliveryDetail` (árvore aninhada completa:
+quotes/items/events/POD/rounds/offers/bids/assignments→driver→vehicle), `getDeliveryPositions`
+(pickup/delivery diretos + driver via assignment→`driver_locations.position` parse).
+`parsePointPosition`: **EWKB hex** (formato default PostgREST/Supabase p/ geography) +
+GeoJSON + WKT fallback — **sem migration** p/ lat/lng.
+
+Endpoints: `GET /api/admin/{overview, deliveries, deliveries/[id], deliveries/[id]/positions}`
+(todos `handleAdminGet`, `cache: no-store`). Polling 30s (overview) / 15s (positions).
+
+### 13.4 Validação
+
+`tsc --noEmit` clean; **235/235** vitest PASS (+`admin-handler`, +`admin-reads` c/ EWKB);
+`next build` limpo. Regressão DB `verify_sessao16.sh` → reset+replay **0001→0030 (30/30)** +
+**10/10 suítes PASS** (zero regressão; 0030 só adiciona função+grant). **Live (dev, real)**:
+401 sem cookie, 307 `/admin` sem sessão, **403** cookie de driver (defense-in-depth), admin
+cookie → 200 overview/deliveries/detail/positions (b2222 in_transit 5 eventos; positions
+driver parseado de EWKB → {lng,lat}; a1111 quote; c3333 delivered). SSR 3 páginas 200 sem
+crash. **3 bugs reais achados+corrigidos live** (grant gap → 0030; hint FK composta
+`bids!bids_offer_driver_fk`; EWKB parse). **Não simulado** (regra mestra). Renderização
+visual Leaflet no browser → usuário. Ações de gestão + telas Entregadores/Empresas →
+sessão futura.
